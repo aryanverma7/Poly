@@ -84,13 +84,14 @@ class StrategyRunner:
         self._lane_runtime: dict[str, dict] = {}
         for _s, ex, _st, _label, suffix in lanes:
             baseline = ex.realize_pnl() if isinstance(ex, PaperExecutor) else 0.0
-            base_stake = float(self.config.buy_amount_usd)
+            base_stake = float(getattr(_s, 'buy_amount_usd', self.config.buy_amount_usd))
             self._lane_runtime[suffix] = {
                 "last_window_realized": float(baseline),
                 "consecutive_losses": 0,
                 "cooldown_windows_remaining": 0,
                 "stake_base_usd": base_stake,
                 "stake_usd": base_stake,
+                "last_confidence": 0.5,
             }
         self._external: Optional[ExternalDataService] = None
         if self.config.enable_external_data:
@@ -278,10 +279,13 @@ class StrategyRunner:
                             base = float(rt.get("stake_base_usd", self.config.buy_amount_usd))
                             min_stake = max(0.01, base * float(self.config.stake_min_mult))
                             max_stake = max(min_stake, base * float(self.config.stake_max_mult))
+                            confidence = float(rt.get("last_confidence", 0.5))
+                            win_mult = 1.0 + (0.5 * confidence)
+                            loss_mult = 1.0 - (0.4 * confidence)
                             if window_pnl > 1e-9:
-                                stake = min(max_stake, stake * 2.0)
+                                stake = min(max_stake, stake * win_mult)
                             elif window_pnl < -1e-9:
-                                stake = max(min_stake, stake * 0.5)
+                                stake = max(min_stake, stake * loss_mult)
                             rt["stake_usd"] = float(stake)
                             if window_pnl < -1e-9:
                                 rt["consecutive_losses"] += 1
@@ -418,6 +422,7 @@ class StrategyRunner:
                         except Exception:
                             pass
                     run_strategy_tick(strategy, data, executor, state)
+                    rt["last_confidence"] = float(getattr(strategy, 'last_confidence', 0.5))
 
                 for strategy, executor, state, _label, _ in self._lanes:
                     if isinstance(executor, PaperExecutor):
@@ -689,7 +694,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    atr_multiplier=3.0,
+                    atr_multiplier=1.5,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
@@ -705,8 +710,8 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    imbalance_ratio=2.0,
-                    max_trades_per_window=2,
+                    imbalance_ratio=3.0,
+                    max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
@@ -721,7 +726,8 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    timeout_sec=30.0,
+                    passive_offset_cents=1.0,
+                    timeout_sec=20.0,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
@@ -767,7 +773,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.end_window_sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    late_start_sec=240.0,
+                    late_start_sec=210.0,
                     btc_move_trigger_usd=cfg.end_window_move_trigger_usd,
                     max_entry_cents=cfg.end_window_max_entry_cents,
                     max_trades_per_window=1,
@@ -784,6 +790,8 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
+                    extreme_entry_cents=12,
+                    max_move_for_contrarian_usd=25.0,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
@@ -797,7 +805,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 OracleLagArbProxyStrategy(
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
+                    buy_amount_usd=cfg.oracle_lag_base_stake_usd,
                     use_external=cfg.enable_external_data and cfg.enable_binance_ws,
                     move_30s_trigger_usd=cfg.oracle_lag_move_trigger_usd,
                     oracle_gap_trigger_usd=cfg.oracle_lag_gap_trigger_usd,
@@ -811,23 +819,42 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 "oracle_lag_proxy",
             )
         )
+        _use_ext_oracle = cfg.enable_external_data and cfg.enable_binance_ws
+        lanes.append(
+            _lane_tuple(
+                OracleLagArbProxyStrategy(
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    buy_amount_usd=cfg.oracle_lag_base_stake_usd,
+                    use_external=_use_ext_oracle,
+                    entry_start_sec=0.0,
+                    entry_end_sec=30.0,
+                    move_30s_trigger_usd=30.0,
+                    oracle_gap_trigger_usd=3.0,
+                    stale_mid_band=cfg.oracle_lag_stale_mid_band,
+                    max_entry_cents=cfg.oracle_lag_max_entry_cents,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Oracle Lag Early" if _use_ext_oracle else "Oracle Lag Early (Proxy)",
+                "oracle_lag_early",
+            )
+        )
         lanes.append(
             _lane_tuple(
                 CrossMarketSentimentProxyStrategy(
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    use_external=cfg.enable_external_data and cfg.enable_binance_ws and cfg.enable_binance_funding and cfg.enable_binance_open_interest,
-                    entry_end_sec=300.0,
+                    use_external=False,
+                    entry_start_sec=0.0,
+                    entry_end_sec=120.0,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                (
-                    "Cross-Market Sentiment"
-                    if (cfg.enable_external_data and cfg.enable_binance_ws and cfg.enable_binance_funding and cfg.enable_binance_open_interest)
-                    else "Cross-Market Bias (Proxy)"
-                ),
+                "Cross-Market Bias (Proxy)",
                 "cross_market_proxy",
             )
         )
@@ -840,6 +867,8 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     use_external=cfg.enable_external_data and cfg.enable_binance_depth,
                     entry_end_sec=300.0,
                     max_trades_per_window=5,
+                    max_entry_cents=55,
+                    spread_capture_cents=5.0,
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),

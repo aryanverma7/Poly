@@ -109,6 +109,7 @@ class _SingleEntryBase(Strategy):
         self._last_window_slug: str = ""
         self._trades_this_window = 0
         self.last_rejection_reason: str = ""
+        self.last_confidence: float = 0.5
 
     def _on_new_window(self):
         self._trades_this_window = 0
@@ -215,11 +216,18 @@ class AtrGuardThresholdStrategy(_SingleEntryBase):
         if not self._btc_guard_ok(data, guard_override=guard):
             self._reject("btc_guard_blocked")
             return None
+        if atr is not None and atr < 50.0:
+            self._reject("atr_regime_flat")
+            return None
         candidates: list[tuple[float, str, str]] = []
         for outcome, token_id in data.token_ids.items():
             ask = _best_ask(data.books.get(token_id))
             if ask is not None and ask <= self.buy_trigger:
                 candidates.append((ask, outcome, token_id))
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+        if move30 is not None and abs(move30) > 20:
+            direction = "Up" if move30 > 0 else "Down"
+            candidates = [(e, o, t) for e, o, t in candidates if o == direction]
         candidates.sort(key=lambda x: x[0])
         if not candidates:
             self._reject("no_price_trigger")
@@ -309,8 +317,7 @@ class HybridEarlyMomentumStrategy(_SingleEntryBase):
         if ask is None:
             self._reject("missing_entry_price")
             return None
-        # Allow paying up (to max_entry) only when momentum is strong.
-        allowed = self.buy_trigger if abs(move30) < self.momentum_trigger * 1.5 else self.max_entry
+        allowed = self.buy_trigger
         if ask > allowed:
             self._reject("ask_not_cheap_enough")
             return None
@@ -355,9 +362,15 @@ class OrderBookImbalanceStrategy(_SingleEntryBase):
             if ask is None or ask > self.buy_trigger:
                 continue
             bid_depth, ask_depth = _depth_near(book, width=0.02)
+            if bid_depth < 50:
+                continue
             ratio = (bid_depth + 1e-9) / (ask_depth + 1e-9)
             if ratio >= self.imbalance_ratio:
                 candidates.append((ask, ratio, outcome, token_id))
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+        if move30 is not None and abs(move30) > 20:
+            direction = "Up" if move30 > 0 else "Down"
+            candidates = [(a, r, o, t) for a, r, o, t in candidates if o == direction]
         candidates.sort(key=lambda x: x[0])
         if not candidates:
             self._reject("no_imbalance_trigger")
@@ -376,7 +389,7 @@ class LayeredLimitEntryStrategy(_SingleEntryBase):
     - If not filled, fallback to market-style buy at threshold (still within entry window)
     """
 
-    def __init__(self, buy_threshold_cents: int = 25, passive_offset_cents: float = 0.1, timeout_sec: float = 30.0, **kwargs):
+    def __init__(self, buy_threshold_cents: int = 25, passive_offset_cents: float = 1.0, timeout_sec: float = 20.0, **kwargs):
         super().__init__(**kwargs)
         self.buy_trigger = buy_threshold_cents / 100.0 + 0.012
         self.passive_price = max(0.01, buy_threshold_cents / 100.0 - passive_offset_cents / 100.0)
@@ -399,7 +412,13 @@ class LayeredLimitEntryStrategy(_SingleEntryBase):
         if not self._btc_guard_ok(data):
             return None
         elapsed = float(data.elapsed_seconds or 0.0)
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+        allowed_dir = None
+        if move30 is not None and abs(move30) > 20:
+            allowed_dir = "Up" if move30 > 0 else "Down"
         for outcome, token_id in data.token_ids.items():
+            if allowed_dir and outcome != allowed_dir:
+                continue
             ask = _best_ask(data.books.get(token_id))
             if ask is None:
                 continue
@@ -437,18 +456,22 @@ class AdaptiveExitStrategy(_SingleEntryBase):
     def __init__(
         self,
         buy_threshold_cents: int = 25,
-        stage1_after_sec: float = 45.0,
+        stage1_after_sec: float = 60.0,
         stage1_target_cents: int = 38,
-        stage2_after_sec: float = 75.0,
+        stage2_after_sec: float = 120.0,
         stage2_target_cents: int = 30,
+        stage3_after_sec: float = 210.0,
+        stage3_target_cents: int = 20,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.buy_trigger = buy_threshold_cents / 100.0 + 0.012
         self.stage1_after = stage1_after_sec
         self.stage2_after = stage2_after_sec
+        self.stage3_after = stage3_after_sec
         self.stage1_target = stage1_target_cents / 100.0
         self.stage2_target = stage2_target_cents / 100.0
+        self.stage3_target = stage3_target_cents / 100.0
         self._position_meta: Optional[dict] = None
 
     @property
@@ -474,6 +497,9 @@ class AdaptiveExitStrategy(_SingleEntryBase):
             if self._position_meta.get("stage", 0) == 1 and elapsed >= self.stage2_after:
                 if executor.replace_pending_sell(token_id, self.stage2_target, self._position_meta["outcome"]) > 0:
                     self._position_meta["stage"] = 2
+            if self._position_meta.get("stage", 0) == 2 and elapsed >= self.stage3_after:
+                if executor.replace_pending_sell(token_id, self.stage3_target, self._position_meta["outcome"]) > 0:
+                    self._position_meta["stage"] = 3
 
         if (not self._can_trade()) or not self._entry_window_open(data.elapsed_seconds):
             return None
@@ -518,7 +544,6 @@ class SignalFusionStrategy(_SingleEntryBase):
 
     def _on_new_window(self):
         super()._on_new_window()
-        self._hist = {}
 
     def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
         slug = getattr(data, "event_slug", "") or ""
@@ -550,6 +575,10 @@ class SignalFusionStrategy(_SingleEntryBase):
             ratio = (bid_depth + 1e-9) / (ask_depth + 1e-9)
             if ask <= self.max_entry and ask <= sma - self.sma_discount and ratio >= self.imbalance_ratio:
                 candidates.append((ask, sma, ratio, outcome, token_id))
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+        if move30 is not None and abs(move30) > 15:
+            direction = "Up" if move30 > 0 else "Down"
+            candidates = [(a, s, r, o, t) for a, s, r, o, t in candidates if o == direction]
         candidates.sort(key=lambda x: x[0])
         if not candidates:
             return None
@@ -613,7 +642,7 @@ class EndWindowMomentumStrategy(_SingleEntryBase):
 class MeanReversionExtremeStrategy(_SingleEntryBase):
     """Contrarian: buy very cheap side early if BTC move not yet extreme."""
 
-    def __init__(self, extreme_entry_cents: int = 15, max_move_for_contrarian_usd: float = 60.0, **kwargs):
+    def __init__(self, extreme_entry_cents: int = 12, max_move_for_contrarian_usd: float = 25.0, **kwargs):
         super().__init__(**kwargs)
         self.extreme = extreme_entry_cents / 100.0
         self.max_move = abs(float(max_move_for_contrarian_usd))
@@ -631,13 +660,19 @@ class MeanReversionExtremeStrategy(_SingleEntryBase):
         cur = data.current_btc_price
         if ref is not None and cur is not None and abs(cur - ref) > self.max_move:
             return None
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
         cheap: list[tuple[float, str, str]] = []
         for outcome, token_id in data.token_ids.items():
             ask = _best_ask(data.books.get(token_id))
             if ask is not None and ask <= self.extreme:
+                if move30 is not None and abs(move30) > 15 and ref is not None and cur is not None:
+                    contra = "Down" if (cur - ref) > 0 else "Up"
+                    if outcome != contra:
+                        continue
                 cheap.append((ask, outcome, token_id))
         cheap.sort(key=lambda x: x[0])
         if not cheap:
+            self._reject("no_reversal_setup")
             return None
         ask, outcome, token_id = cheap[0]
         return self._buy_and_queue_sell(data, executor, token_id, outcome, ask, "buy_then_sell_mean_reversion")
@@ -657,9 +692,11 @@ class OracleLagArbProxyStrategy(_SingleEntryBase):
         max_entry_cents: int = 75,
         use_external: bool = False,
         oracle_gap_trigger_usd: float = 5.0,
+        entry_start_sec: float = 210.0,
+        entry_end_sec: float = 300.0,
         **kwargs,
     ):
-        super().__init__(entry_start_sec=210.0, entry_end_sec=300.0, **kwargs)
+        super().__init__(entry_start_sec=entry_start_sec, entry_end_sec=entry_end_sec, **kwargs)
         self.move_trigger = abs(float(move_30s_trigger_usd))
         self.stale_band = max(0.01, float(stale_mid_band))
         self.max_entry = max_entry_cents / 100.0
@@ -712,6 +749,8 @@ class OracleLagArbProxyStrategy(_SingleEntryBase):
         if ask > self.max_entry:
             self._reject("ask_too_expensive")
             return None
+        conf = min(1.0, max(0.5, abs(gap) / 20.0)) if gap is not None else 0.7
+        self.last_confidence = conf
         return self._buy_and_queue_sell(
             data,
             executor,
@@ -722,6 +761,7 @@ class OracleLagArbProxyStrategy(_SingleEntryBase):
             {
                 "btc_move_30s": round(move30, 2),
                 "oracle_gap_usd": round(gap, 2) if gap is not None else None,
+                "confidence": round(conf, 2),
             },
         )
 
@@ -731,7 +771,7 @@ class CrossMarketSentimentProxyStrategy(_SingleEntryBase):
 
     def __init__(
         self,
-        min_regime_atr_usd: float = 35.0,
+        min_regime_atr_usd: float = 15.0,
         max_entry_cents: int = 45,
         use_external: bool = False,
         min_oi_change_5m: float = 0.0002,
@@ -758,6 +798,15 @@ class CrossMarketSentimentProxyStrategy(_SingleEntryBase):
         if not self._entry_window_open(data.elapsed_seconds):
             self._reject("entry_window_closed")
             return None
+        if self.use_external and data.external_last_ws_at is not None:
+            from datetime import datetime as _dt, timezone as _tz
+            try:
+                age = (_dt.now(_tz.utc) - _dt.fromisoformat(data.external_last_ws_at)).total_seconds()
+                if age > 60:
+                    self._reject("ws_data_stale")
+                    return None
+            except Exception:
+                pass
         direction: Optional[str] = None
         if self.use_external:
             funding = data.funding_rate
@@ -784,8 +833,11 @@ class CrossMarketSentimentProxyStrategy(_SingleEntryBase):
         else:
             atr = data.btc_atr_1m_10m
             move30 = data.btc_move_30s
-            if atr is None or move30 is None or atr < self.min_regime_atr:
-                self._reject("atr_or_momentum_filter")
+            if move30 is None:
+                self._reject("momentum_missing")
+                return None
+            if atr is not None and atr < self.min_regime_atr:
+                self._reject("atr_regime_low")
                 return None
             direction = "Up" if move30 > 0 else "Down"
         token_id = data.token_ids.get(direction)
@@ -877,8 +929,9 @@ class MicroMarketMakingProxyStrategy(_SingleEntryBase):
         _, outcome, token_id, ask = best
         result = self._buy_and_queue_sell(data, executor, token_id, outcome, ask, "buy_then_sell_mm_proxy")
         if result:
-            # Override queued sell to a tighter spread-capture target for MM style.
-            target = min(0.99, ask + self.capture)
+            atr = data.btc_atr_1m_10m
+            dynamic_capture = max(self.capture, (atr * 0.0005) if atr else self.capture)
+            target = min(0.99, ask + dynamic_capture)
             executor.replace_pending_sell(token_id, target, outcome)
             result["mm_target"] = round(target, 4)
         return result

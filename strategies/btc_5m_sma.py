@@ -70,7 +70,9 @@ class Btc5mSmaStrategy(Strategy):
     def _reset_window(self, token_ids: dict[str, str]) -> None:
         self._trades_this_window = 0
         self.last_rejection_reason = ""
-        self._history = {token_id: deque(maxlen=self.sma_window_ticks) for token_id in token_ids.values()}
+        for token_id in token_ids.values():
+            if token_id not in self._history:
+                self._history[token_id] = deque(maxlen=self.sma_window_ticks)
 
     def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
         slug = getattr(data, "event_slug", "") or ""
@@ -118,6 +120,10 @@ class Btc5mSmaStrategy(Strategy):
             if ask <= sma - self.sma_discount and ask <= self.max_entry:
                 candidates.append((ask, sma, outcome, token_id))
 
+        move30 = getattr(data, 'binance_move_30s', None) or getattr(data, 'btc_move_30s', None)
+        if move30 is not None and abs(move30) > 20:
+            direction = "Up" if move30 > 0 else "Down"
+            candidates = [(a, s, o, t) for a, s, o, t in candidates if o == direction]
         candidates.sort(key=lambda x: x[0])
         if not candidates:
             self.last_rejection_reason = "no_sma_trigger"

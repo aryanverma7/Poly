@@ -100,6 +100,7 @@ export default function App() {
   const [bookPrices, setBookPrices] = useState({ outcomes: {}, slug: null })
   const [page, setPage] = useState(() => readPageFromHash())
   const [strategyData, setStrategyData] = useState({})
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const tickRef = useRef(null)
   const [, setTick] = useState(0)
 
@@ -359,21 +360,40 @@ export default function App() {
   const canLoadMoreTrades = detailTrades.length < detailTradesTotal
   const canLoadMoreRoundtrips = detailRoundtrips.length < detailRoundtripsTotal
 
+  const navTo = (p) => { setPage(p); setSidebarOpen(false) }
+
   return (
     <div className="app">
-      <h1>Polymarket Bitcoin 5m Strategy</h1>
-      <p className="muted">Home has overview + leaderboard. Open any strategy for full details and history.</p>
-
-      <div className="controls" style={{ marginTop: 12 }}>
-        <button
-          type="button"
-          className={page.type === 'home' ? 'primary' : ''}
-          onClick={() => setPage({ type: 'home' })}
-        >
+      {sidebarOpen && <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />}
+      <nav className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <strong>Navigation</strong>
+          <button type="button" className="sidebar-close" onClick={() => setSidebarOpen(false)}>×</button>
+        </div>
+        <button type="button" className={`sidebar-item ${page.type === 'home' ? 'active' : ''}`} onClick={() => navTo({ type: 'home' })}>
           Home
         </button>
+        {strategies.map((st) => {
+          const pnl = toNum(st.session_profit, 0)
+          return (
+            <button
+              type="button"
+              key={st.id}
+              className={`sidebar-item ${page.type === 'strategy' && page.strategyId === st.id ? 'active' : ''}`}
+              onClick={() => navTo({ type: 'strategy', strategyId: st.id })}
+            >
+              <span className="sidebar-item-label">{st.label || st.id}</span>
+              <span className={pnl >= 0 ? 'positive' : 'negative'}>{formatUsd(pnl, true)}</span>
+            </button>
+          )
+        })}
+      </nav>
+
+      <div className="top-bar">
+        <button type="button" className="menu-toggle" onClick={() => setSidebarOpen((v) => !v)}>☰</button>
+        <h1>Polymarket BTC 5m Strategy</h1>
         {page.type === 'strategy' && selectedStrategy && (
-          <span className="muted">Viewing: {selectedStrategy.label || selectedStrategy.id}</span>
+          <span className="muted" style={{ marginLeft: 12 }}>{selectedStrategy.label || selectedStrategy.id}</span>
         )}
       </div>
 
