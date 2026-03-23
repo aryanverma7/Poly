@@ -98,6 +98,10 @@ th { color: var(--muted); }
 .sidebar-item.active { background: rgba(59, 130, 246, 0.15); border-left: 3px solid var(--accent); }
 .sidebar-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; }
 
+.all-strategy-section { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.all-strategy-section .card { margin-bottom: 0.75rem; }
+.all-strategy-section table { font-size: 0.8rem; }
+
 .top-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 1rem; }
 .top-bar h1 { font-size: 1.3rem; margin: 0; }
 .menu-toggle {

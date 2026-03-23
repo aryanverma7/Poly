@@ -266,25 +266,48 @@ class PaperExecutor(Executor):
         self._pending_sells = next_pending
         return updated
 
-    def settle_unfilled_at_window_end(self, token_ids: list) -> None:
-        """At end of 5m window: close any position in these tokens at 0 (loss); cancel pending sells for them."""
+    def settle_unfilled_at_window_end(
+        self, token_ids: list, resolve_prices: dict | None = None
+    ) -> None:
+        """At end of 5m window: close any open position at the resolution price.
+
+        resolve_prices maps token_id -> last_trade_price fetched from the book
+        just before the window flipped.  A price >= 0.90 means that side won
+        ($1 payout); a price <= 0.10 means it lost ($0 payout).  When the map
+        is absent we fall back to 0 (conservative / old behaviour).
+        """
+        resolve_prices = resolve_prices or {}
+        # Cancel all pending sells for these tokens up front — avoids orphaned
+        # entries when a position was already closed mid-window (e.g. limit hit).
+        self._pending_sells = [p for p in self._pending_sells if p.token_id not in token_ids]
         for token_id in token_ids:
             pos = self._positions.pop(token_id, None)
             if pos:
                 cost = pos.size * pos.avg_price
+                # Use provided resolution price; clamp to [0, 1].
+                raw_price = resolve_prices.get(token_id)
+                if raw_price is not None:
+                    settle_price = max(0.0, min(1.0, float(raw_price)))
+                else:
+                    settle_price = 0.0
+                revenue = pos.size * settle_price
+                tag = "paper-settle-win" if settle_price >= 0.90 else "paper-settle-loss"
                 self._fills.append(
                     Fill(
                         token_id=token_id,
                         side="sell",
-                        price=0.0,
+                        price=settle_price,
                         size=pos.size,
-                        amount_usd=0.0,
+                        amount_usd=revenue,
                         outcome=pos.outcome or "",
-                        order_id="paper-settle-loss",
+                        order_id=tag,
                     )
                 )
-                logger.info("Paper: window ended, position closed at 0 (loss %.2f) for %s", cost, token_id[:16])
-        self._pending_sells = [p for p in self._pending_sells if p.token_id not in token_ids]
+                pnl = revenue - cost
+                logger.info(
+                    "Paper settle: %s @ %.2f → revenue $%.2f, P&L $%.2f for %s",
+                    tag, settle_price, revenue, pnl, token_id[:16],
+                )
 
     def realize_pnl(self) -> float:
         """Total realized P&L from fills (simplified: sum(sell revenue) - sum(buy cost)."""
@@ -294,10 +317,10 @@ class PaperExecutor(Executor):
 
     def get_equity_curve(self) -> list[tuple[datetime, float]]:
         """Balance after each fill (for chart). Reconstruct from start balance + fills."""
-        curve: list[tuple[datetime, float]] = []
         start = getattr(self, "_starting_balance", self._balance + self.realize_pnl())
         if not self._fills:
-            return [(datetime.utcnow(), self._balance)]
+            return [(datetime.utcnow(), start)]
+        curve: list[tuple[datetime, float]] = []
         running = start
         for f in self._fills:
             if f.side == "buy":
@@ -305,7 +328,9 @@ class PaperExecutor(Executor):
             else:
                 running += f.amount_usd
             curve.append((f.ts, running))
-        curve.append((datetime.utcnow(), self._balance))
+        # Do NOT append a trailing (now, balance) point — it creates a
+        # phantom dip whenever an open buy position has deducted cash
+        # but no matching sell fill exists yet.
         return curve
 
     def set_starting_balance(self, value: float) -> None:

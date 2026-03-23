@@ -73,6 +73,13 @@ class StateResponse(BaseModel):
     trades_log_files: dict = {}
     external_data_enabled: bool = False
     external_data_last_ws_at: str | None = None
+    main_loop_cycle_ms_avg: float = 0.0
+    main_loop_cycle_ms_last: float = 0.0
+    clob_ws_connected: bool = False
+    clob_last_update_age_sec: float | None = None
+    clob_last_error_msg: str | None = None
+    urgent_wake_count_60s: int = 0
+    last_rest_fetches: int = 0
     external_snapshot: dict = {}
 
 class PaginatedResponse(BaseModel):
@@ -222,6 +229,13 @@ def get_state() -> StateResponse:
         trades_log_files=s.get("trades_log_files") or {},
         external_data_enabled=bool(s.get("external_data_enabled")),
         external_data_last_ws_at=s.get("external_data_last_ws_at"),
+        main_loop_cycle_ms_avg=float(s.get("main_loop_cycle_ms_avg", 0.0)),
+        main_loop_cycle_ms_last=float(s.get("main_loop_cycle_ms_last", 0.0)),
+        clob_ws_connected=bool(s.get("clob_ws_connected", False)),
+        clob_last_update_age_sec=s.get("clob_last_update_age_sec"),
+        clob_last_error_msg=s.get("clob_last_error_msg"),
+        urgent_wake_count_60s=int(s.get("urgent_wake_count_60s", 0)),
+        last_rest_fetches=int(s.get("last_rest_fetches", 0)),
         external_snapshot=s.get("external_snapshot") or {},
     )
 
@@ -229,7 +243,7 @@ def get_state() -> StateResponse:
 def get_strategy_trades(
     strategy_id: str,
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=10000),
 ) -> PaginatedResponse:
     runner = get_runner()
     if not runner:
@@ -242,7 +256,7 @@ def get_strategy_trades(
 def get_strategy_roundtrips(
     strategy_id: str,
     offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=10000),
 ) -> PaginatedResponse:
     runner = get_runner()
     if not runner:
