@@ -138,8 +138,32 @@ export default function App() {
   const [page, setPage] = useState(() => readPageFromHash())
   const [strategyData, setStrategyData] = useState({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [safeMode, setSafeMode] = useState(true)
+  const [safeModeStrategies, setSafeModeStrategies] = useState([])
   const tickRef = useRef(null)
   const [, setTick] = useState(0)
+
+  const loadSafeMode = useCallback(async () => {
+    try {
+      const r = await fetch(api('/api/safe-mode'))
+      const d = await r.json()
+      setSafeMode(d.safe_mode)
+      setSafeModeStrategies(d.strategies || [])
+    } catch (e) { console.warn('safe-mode fetch', e) }
+  }, [])
+
+  const toggleSafeMode = useCallback(async () => {
+    const next = !safeMode
+    try {
+      const r = await fetch(api('/api/safe-mode'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      const d = await r.json()
+      setSafeMode(d.safe_mode)
+    } catch (e) { console.warn('safe-mode toggle', e) }
+  }, [safeMode])
 
   const loadInit = useCallback(async () => {
     try {
@@ -249,7 +273,8 @@ export default function App() {
   useEffect(() => {
     loadInit()
     loadState()
-  }, [loadInit, loadState])
+    loadSafeMode()
+  }, [loadInit, loadState, loadSafeMode])
 
   useEffect(() => {
     const onHash = () => setPage(readPageFromHash())
@@ -358,6 +383,8 @@ export default function App() {
     [strategies, page.strategyId]
   )
 
+  const [lbSort, setLbSort] = useState({ col: 'pnl', dir: 'desc' })
+
   const leaderboard = useMemo(
     () =>
       [...strategies]
@@ -381,9 +408,24 @@ export default function App() {
             return Math.round((wins / trips.length) * 100)
           })(),
         }))
-        .sort((a, b) => b.pnl - a.pnl),
-    [strategies, strategyData]
+        .sort((a, b) => {
+          const { col, dir } = lbSort
+          const mult = dir === 'asc' ? 1 : -1
+          if (col === 'label') return mult * a.label.localeCompare(b.label)
+          const av = a[col] ?? -Infinity
+          const bv = b[col] ?? -Infinity
+          return mult * (av - bv)
+        }),
+    [strategies, strategyData, lbSort]
   )
+
+  const handleLbSort = (col) => {
+    setLbSort((prev) =>
+      prev.col === col
+        ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { col, dir: 'asc' }
+    )
+  }
 
   const comparisonChartData = useMemo(() => {
     if (!strategies.some((st) => (st.equity_curve || []).length > 0)) return null
@@ -494,6 +536,23 @@ export default function App() {
             role="button"
             tabIndex={0}
           />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="muted">Safe mode</span>
+          <div
+            className={`switch ${safeMode ? 'on' : ''}`}
+            onClick={toggleSafeMode}
+            role="button"
+            tabIndex={0}
+            title={
+              safeMode
+                ? `ON — strategies refuse entries below floor price.\nAffects: ${safeModeStrategies.join(', ')}`
+                : `OFF — no floor price restriction on any strategy`
+            }
+          />
+          <span className={`badge ${safeMode ? 'paper' : 'live'}`} style={{ fontSize: 11 }}>
+            {safeMode ? 'ON' : 'OFF'}
+          </span>
         </div>
         <button type="button" className="primary" disabled={s.running || !init?.ok} onClick={onStart}>
           Start Strategy
@@ -658,18 +717,40 @@ export default function App() {
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>Strategy</th>
-                  <th>P&amp;L</th>
-                  <th>ROI</th>
-                  <th>Trades</th>
-                  <th>Win %</th>
+                  {[
+                    { col: 'label',    label: 'Strategy' },
+                    { col: 'pnl',      label: 'P&L' },
+                    { col: 'roiPct',   label: 'ROI' },
+                    { col: 'trades',   label: 'Trades' },
+                    { col: 'winRate',  label: 'Win %' },
+                  ].map(({ col, label }) => (
+                    <th
+                      key={col}
+                      onClick={() => handleLbSort(col)}
+                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                    >
+                      {label}
+                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                    </th>
+                  ))}
                   <th>Cap/window</th>
                   <th>Loss streak</th>
                   <th>Cooldown</th>
                   <th>Last reject reason</th>
-                  <th>Stake</th>
-                  <th>Invested</th>
-                  <th>Balance</th>
+                  {[
+                    { col: 'stakeUsd', label: 'Stake' },
+                    { col: 'invested', label: 'Invested' },
+                    { col: 'balance',  label: 'Balance' },
+                  ].map(({ col, label }) => (
+                    <th
+                      key={col}
+                      onClick={() => handleLbSort(col)}
+                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                    >
+                      {label}
+                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                    </th>
+                  ))}
                   {page.type !== 'all' && <th>Page</th>}
                 </tr>
               </thead>

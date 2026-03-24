@@ -18,6 +18,31 @@ from strategies.base import MarketData, Strategy
 
 logger = logging.getLogger(__name__)
 
+_SAFE_MODE: bool = True  # toggled via /api/safe-mode
+
+
+def set_safe_mode(enabled: bool) -> None:
+    global _SAFE_MODE
+    _SAFE_MODE = bool(enabled)
+
+
+def get_safe_mode() -> bool:
+    return _SAFE_MODE
+
+
+SAFE_MODE_STRATEGIES = [
+    "ConfirmedMomentumCarryStrategy",
+    "EarlyBreakoutStrategy",
+    "ExhaustionFadeStrategy",
+    "HybridEarlyMomentumStrategy",
+    "LateHighConfidenceStrategy",
+    "MidWindowMomentumStrategy",
+    "OpeningDiscountScalperStrategy",
+    "OracleLagArbProxyStrategy",
+    "OrderBookImbalanceStrategy",
+    "PriceSkewFadeStrategy",
+]
+
 
 def _best_ask(book) -> Optional[float]:
     if book is None:
@@ -319,7 +344,7 @@ class HybridEarlyMomentumStrategy(_SingleEntryBase):
         if ask is None:
             self._reject("missing_entry_price")
             return None
-        if ask < 0.13:
+        if _SAFE_MODE and ask < 0.13:
             self._reject("ask_below_floor")
             return None
         allowed = self.buy_trigger
@@ -364,7 +389,7 @@ class OrderBookImbalanceStrategy(_SingleEntryBase):
         for outcome, token_id in data.token_ids.items():
             book = data.books.get(token_id)
             ask = _best_ask(book)
-            if ask is None or ask < 0.13 or ask > self.buy_trigger:
+            if ask is None or _SAFE_MODE and ask < 0.13 or ask > self.buy_trigger:
                 continue
             bid_depth, ask_depth = _depth_near(book, width=0.02)
             ratio = (bid_depth + 1e-9) / (ask_depth + 1e-9)
@@ -757,7 +782,7 @@ class OpeningDiscountScalperStrategy(_SingleEntryBase):
         candidates: list[tuple[float, str, str]] = []
         for outcome, token_id in data.token_ids.items():
             ask = _best_ask(data.books.get(token_id))
-            if ask is None or ask < 0.08 or ask > self.max_entry:
+            if ask is None or _SAFE_MODE and ask < 0.08 or ask > self.max_entry:
                 continue
             if move30 is not None and abs(move30) > 15:
                 direction = "Up" if move30 > 0 else "Down"
@@ -831,7 +856,7 @@ class ExhaustionFadeStrategy(_SingleEntryBase):
         if ask is None or ask > self.max_entry:
             self._reject("ask_too_expensive")
             return None
-        if ask < 0.10:
+        if _SAFE_MODE and ask < 0.10:
             self._reject("ask_too_cheap_reversal_unlikely")
             return None
 
@@ -1000,26 +1025,29 @@ class FundingTrendFollowerStrategy(_SingleEntryBase):
 
 class OracleLagArbProxyStrategy(_SingleEntryBase):
     """
-    Oracle lag arbitrage proxy:
-    - Use fast BTC 30s move from internal feed
-    - Enter when move is large but market mid is still near 50/50 (stale)
+    Oracle lag arbitrage: BTC has spiked, Polymarket hasn't repriced yet.
+
+    Fixes vs original:
+    - Entry window T=60-200s only (lag can't exist after T=200s — market has
+      had 3+ min to reprice; late cheap tokens are cheap for a reason)
+    - Requires window move (from reference BTC) to agree with 30s direction
+    - Price fairness check: token must be >= 18c below model fair price
+    - Removed stale-band check (was allowing 67c Down buys at T=250s)
     """
 
     def __init__(
         self,
         move_30s_trigger_usd: float = 45.0,
-        stale_mid_band: float = 0.07,
-        max_entry_cents: int = 75,
+        max_entry_cents: int = 55,
         use_external: bool = False,
         oracle_gap_trigger_usd: float = 5.0,
-        entry_start_sec: float = 210.0,
-        entry_end_sec: float = 300.0,
-        min_profit_margin: float = 0.30,
+        entry_start_sec: float = 60.0,
+        entry_end_sec: float = 200.0,
+        min_profit_margin: float = 0.20,
         **kwargs,
     ):
         super().__init__(entry_start_sec=entry_start_sec, entry_end_sec=entry_end_sec, **kwargs)
         self.move_trigger = abs(float(move_30s_trigger_usd))
-        self.stale_band = max(0.01, float(stale_mid_band))
         self.max_entry = max_entry_cents / 100.0
         self.use_external = bool(use_external)
         self.oracle_gap_trigger = abs(float(oracle_gap_trigger_usd))
@@ -1038,44 +1066,57 @@ class OracleLagArbProxyStrategy(_SingleEntryBase):
         if not self._entry_window_open(data.elapsed_seconds):
             self._reject("entry_window_closed")
             return None
+
         move30 = data.binance_move_30s if self.use_external and data.binance_move_30s is not None else data.btc_move_30s
         if move30 is None or abs(move30) < self.move_trigger:
             self._reject("momentum_too_weak")
             return None
-        gap = data.oracle_gap_usd
-        if self.use_external:
-            # Use oracle gap when available, but don't hard-fail if local feed lags/misses.
-            if gap is not None and abs(gap) < self.oracle_gap_trigger:
-                self._reject("oracle_gap_too_small")
-                return None
-        direction = "Up" if move30 > 0 else "Down"
-        token_id = data.token_ids.get(direction)
-        opp_token_id = data.token_ids.get("Down" if direction == "Up" else "Up")
-        if not token_id or not opp_token_id:
+
+        # Bug 2 fix: window move must exist and agree with 30s direction
+        ref = data.reference_btc_price
+        cur = data.current_btc_price
+        if ref is None or cur is None:
+            self._reject("missing_btc_ref")
             return None
+        window_move = cur - ref
+        if abs(window_move) < 30.0:
+            self._reject("window_move_too_small")
+            return None
+        if (window_move > 0) != (move30 > 0):
+            self._reject("window_and_30s_disagree")
+            return None
+
+        gap = data.oracle_gap_usd
+        if self.use_external and gap is not None and abs(gap) < self.oracle_gap_trigger:
+            self._reject("oracle_gap_too_small")
+            return None
+
+        # Direction from window move (authoritative), not just 30s spike
+        direction = "Up" if window_move > 0 else "Down"
+        token_id = data.token_ids.get(direction)
+        if not token_id:
+            return None
+
         ask = _best_ask(data.books.get(token_id))
         if ask is None:
             ask = _last_trade(data.books.get(token_id))
-        opp_ask = _best_ask(data.books.get(opp_token_id))
-        if opp_ask is None:
-            opp_ask = _last_trade(data.books.get(opp_token_id))
         if ask is None:
             self._reject("missing_entry_price")
             return None
-        # Below 11¢ the market has overwhelming conviction against this side.
-        # Data: ALL entries at ≤10¢ expired worthless; entries at 11¢ and 16¢ were wins.
-        if ask < 0.11:
-            self._reject("ask_too_low_sub11c")
+        if _SAFE_MODE and ask < 0.13:
+            self._reject("ask_below_floor")
             return None
-        if opp_ask is not None:
-            mid = (ask + (1.0 - opp_ask)) / 2.0
-            # If market is already strongly repriced away from 50/50, only allow very strong move.
-            if abs(mid - 0.5) > self.stale_band and abs(move30) < self.move_trigger * 1.5:
-                self._reject("market_not_stale")
-                return None
         if ask > self.max_entry:
             self._reject("ask_too_expensive")
             return None
+
+        # Bug 3 fix: price fairness — token must be genuinely cheap vs window move
+        # Model: fair_price ≈ 0.50 + |window_move| / 350  (capped 0.05-0.95)
+        expected_price = min(0.95, max(0.05, 0.50 + abs(window_move) / 350.0))
+        if ask > expected_price - 0.18:
+            self._reject("market_already_repriced")
+            return None
+
         conf = min(1.0, max(0.5, abs(gap) / 20.0)) if gap is not None else 0.7
         self.last_confidence = conf
         dynamic_sell = min(0.97, max(self.sell_limit, ask + self.min_profit_margin))
@@ -1088,6 +1129,8 @@ class OracleLagArbProxyStrategy(_SingleEntryBase):
             "buy_then_sell_oracle_lag",
             {
                 "btc_move_30s": round(move30, 2),
+                "window_move": round(window_move, 2),
+                "expected_price": round(expected_price, 3),
                 "oracle_gap_usd": round(gap, 2) if gap is not None else None,
                 "confidence": round(conf, 2),
                 "dynamic_sell": round(dynamic_sell, 4),
@@ -1258,7 +1301,7 @@ class LateHighConfidenceStrategy(_SingleEntryBase):
             self._reject("missing_price")
             return None
         # Must be in oracle-lag zone: cheap enough to have edge, not so cheap market disagrees
-        if ask < 0.35:
+        if _SAFE_MODE and ask < 0.35:
             self._reject("ask_too_low_reversal_risk")
             return None
         if ask > self.max_entry:
@@ -1339,7 +1382,7 @@ class MidWindowMomentumStrategy(_SingleEntryBase):
         if ask is None or ask > self.max_entry:
             self._reject("ask_too_expensive")
             return None
-        if ask < 0.13:
+        if _SAFE_MODE and ask < 0.13:
             self._reject("ask_below_floor")
             return None
 
@@ -1698,7 +1741,7 @@ class PriceSkewFadeStrategy(_SingleEntryBase):
         cheap_outcome, cheap_ask = min(asks_list, key=lambda x: x[1])
         expensive_outcome, expensive_ask = max(asks_list, key=lambda x: x[1])
 
-        if cheap_ask < 0.10:
+        if _SAFE_MODE and cheap_ask < 0.10:
             self._reject("ask_too_cheap_no_edge")
             return None
         if cheap_ask > self.max_entry:
@@ -1805,5 +1848,235 @@ class LateFlatBetStrategy(_SingleEntryBase):
         )
         if result:
             executor.replace_pending_sell(token_id, self.sell_target, outcome)
+            result["sell_limit"] = self.sell_target
+        return result
+
+
+class EarlyBreakoutStrategy(_SingleEntryBase):
+    """
+    Catches BTC breakout momentum in the first 75s of a window.
+
+    When BTC spikes hard (>$40 in 30s) within the first minute, Polymarket
+    market makers take 30-90 seconds to fully reprice. Enter before they do.
+    Requires 30s move AND window move to agree (rules out isolated spikes).
+
+    Entry: T=0-75s | |move_30s| > $40 | window move agrees | Buy <= 40c | Sell 70c
+    """
+
+    def __init__(
+        self,
+        move_30s_trigger_usd: float = 40.0,
+        max_entry_cents: int = 40,
+        sell_target_cents: int = 70,
+        **kwargs,
+    ):
+        kwargs.setdefault("entry_end_sec", 75.0)
+        super().__init__(entry_start_sec=0.0, **kwargs)
+        self.move_trigger = abs(float(move_30s_trigger_usd))
+        self.max_entry = max_entry_cents / 100.0
+        self.sell_target = sell_target_cents / 100.0
+
+    @property
+    def name(self) -> str:
+        return "Early Breakout"
+
+    def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
+        slug = getattr(data, "event_slug", "") or ""
+        self._reset_if_new_window(slug)
+        if not self._can_trade() or not self._entry_window_open(data.elapsed_seconds):
+            self._reject("entry_window_closed")
+            return None
+
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+        if move30 is None or abs(move30) < self.move_trigger:
+            self._reject("move_too_weak")
+            return None
+
+        ref = data.reference_btc_price
+        cur = data.current_btc_price
+        if ref is not None and cur is not None and data.elapsed_seconds and data.elapsed_seconds > 10:
+            window_move = cur - ref
+            if abs(window_move) > 5 and (window_move > 0) != (move30 > 0):
+                self._reject("early_reversal_signal")
+                return None
+
+        direction = "Up" if move30 > 0 else "Down"
+        token_id = data.token_ids.get(direction)
+        if not token_id:
+            return None
+
+        ask = _best_ask(data.books.get(token_id))
+        if ask is None or _SAFE_MODE and ask < 0.13 or ask > self.max_entry:
+            self._reject("ask_out_of_range")
+            return None
+
+        result = self._buy_and_queue_sell(
+            data, executor, token_id, direction, ask,
+            "buy_early_breakout",
+            {"move_30s": round(move30, 2), "elapsed": round(float(data.elapsed_seconds or 0), 1)},
+        )
+        if result:
+            executor.replace_pending_sell(token_id, self.sell_target, direction)
+            result["sell_limit"] = self.sell_target
+        return result
+
+
+class ConfirmedMomentumCarryStrategy(_SingleEntryBase):
+    """
+    Mid-window momentum confirmation: BTC moved >$35 from window start AND
+    30s move still agrees -- the trend is established, not just a spike.
+
+    Enter the trending side if still underpriced relative to the move.
+    Fair-price model: 0.50 + |window_move| / 350 -- must have >= 10c discount.
+
+    Entry: T=90-180s | window_move > $35 | 30s agrees | Buy <= 55c | Sell 80c
+    """
+
+    def __init__(
+        self,
+        min_window_move_usd: float = 35.0,
+        min_move_30s_usd: float = 10.0,
+        max_entry_cents: int = 55,
+        sell_target_cents: int = 80,
+        **kwargs,
+    ):
+        super().__init__(entry_start_sec=90.0, entry_end_sec=180.0, **kwargs)
+        self.min_window_move = abs(float(min_window_move_usd))
+        self.min_move_30s = abs(float(min_move_30s_usd))
+        self.max_entry = max_entry_cents / 100.0
+        self.sell_target = sell_target_cents / 100.0
+
+    @property
+    def name(self) -> str:
+        return "Confirmed Momentum Carry"
+
+    def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
+        slug = getattr(data, "event_slug", "") or ""
+        self._reset_if_new_window(slug)
+        if not self._can_trade() or not self._entry_window_open(data.elapsed_seconds):
+            self._reject("entry_window_closed")
+            return None
+
+        ref = data.reference_btc_price
+        cur = data.current_btc_price
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+
+        if ref is None or cur is None or move30 is None:
+            self._reject("missing_data")
+            return None
+
+        window_move = cur - ref
+        if abs(window_move) < self.min_window_move:
+            self._reject("window_move_too_small")
+            return None
+        if abs(move30) < self.min_move_30s:
+            self._reject("move_30s_too_weak")
+            return None
+        if (window_move > 0) != (move30 > 0):
+            self._reject("trend_reversing")
+            return None
+
+        direction = "Up" if window_move > 0 else "Down"
+        token_id = data.token_ids.get(direction)
+        if not token_id:
+            return None
+
+        ask = _best_ask(data.books.get(token_id))
+        if ask is None or _SAFE_MODE and ask < 0.13 or ask > self.max_entry:
+            self._reject("ask_out_of_range")
+            return None
+
+        expected = min(0.95, 0.50 + abs(window_move) / 350.0)
+        if ask > expected - 0.10:
+            self._reject("market_already_repriced")
+            return None
+
+        result = self._buy_and_queue_sell(
+            data, executor, token_id, direction, ask,
+            "buy_confirmed_momentum_carry",
+            {"window_move": round(window_move, 2), "move_30s": round(move30, 2),
+             "expected_price": round(expected, 3)},
+        )
+        if result:
+            executor.replace_pending_sell(token_id, self.sell_target, direction)
+            result["sell_limit"] = self.sell_target
+        return result
+
+
+class SustainedTrendLockInStrategy(_SingleEntryBase):
+    """
+    Late-window sustained trend: BTC moved >$60 from window start AND still
+    trending (30s move agrees). Market sometimes lags at 60-75c when fair
+    value is 80-90c.
+
+    Requires both FULL window trend AND recent momentum to be large and aligned.
+    Refuses when trend is stalling or reversing.
+
+    Entry: T=180-260s | window_move > $60 | 30s agrees | Buy 0.40-0.75 | Sell 0.90
+    """
+
+    def __init__(
+        self,
+        min_window_move_usd: float = 60.0,
+        min_move_30s_usd: float = 15.0,
+        min_entry_cents: int = 40,
+        max_entry_cents: int = 75,
+        sell_target_cents: int = 90,
+        **kwargs,
+    ):
+        super().__init__(entry_start_sec=180.0, entry_end_sec=260.0, **kwargs)
+        self.min_window_move = abs(float(min_window_move_usd))
+        self.min_move_30s = abs(float(min_move_30s_usd))
+        self.min_entry = min_entry_cents / 100.0
+        self.max_entry = max_entry_cents / 100.0
+        self.sell_target = sell_target_cents / 100.0
+
+    @property
+    def name(self) -> str:
+        return "Sustained Trend Lock-In"
+
+    def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
+        slug = getattr(data, "event_slug", "") or ""
+        self._reset_if_new_window(slug)
+        if not self._can_trade() or not self._entry_window_open(data.elapsed_seconds):
+            self._reject("entry_window_closed")
+            return None
+
+        ref = data.reference_btc_price
+        cur = data.current_btc_price
+        move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
+
+        if ref is None or cur is None or move30 is None:
+            self._reject("missing_data")
+            return None
+
+        window_move = cur - ref
+        if abs(window_move) < self.min_window_move:
+            self._reject("window_move_too_small")
+            return None
+        if abs(move30) < self.min_move_30s:
+            self._reject("trend_stalling")
+            return None
+        if (window_move > 0) != (move30 > 0):
+            self._reject("trend_reversing")
+            return None
+
+        direction = "Up" if window_move > 0 else "Down"
+        token_id = data.token_ids.get(direction)
+        if not token_id:
+            return None
+
+        ask = _best_ask(data.books.get(token_id))
+        if ask is None or ask < self.min_entry or ask > self.max_entry:
+            self._reject("ask_out_of_range")
+            return None
+
+        result = self._buy_and_queue_sell(
+            data, executor, token_id, direction, ask,
+            "buy_sustained_trend_lock_in",
+            {"window_move": round(window_move, 2), "move_30s": round(move30, 2)},
+        )
+        if result:
+            executor.replace_pending_sell(token_id, self.sell_target, direction)
             result["sell_limit"] = self.sell_target
         return result

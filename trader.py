@@ -22,7 +22,9 @@ from strategies.base import MarketData, Strategy
 from strategies.advanced import (
     AtrGuardThresholdStrategy,
     ConfirmedFlatScalperStrategy,
+    ConfirmedMomentumCarryStrategy,
     CrossMarketSentimentProxyStrategy,
+    EarlyBreakoutStrategy,
     EndWindowMomentumStrategy,
     ExhaustionFadeStrategy,
     FlatMarketMeanReversionStrategy,
@@ -38,6 +40,7 @@ from strategies.advanced import (
     PriceSkewFadeStrategy,
     RebalancingArbStrategy,
     SignalFusionStrategy,
+    SustainedTrendLockInStrategy,
     WindowMomentumCarryStrategy,
 )
 from strategies.btc_5m import Btc5mStrategy
@@ -309,45 +312,25 @@ class StrategyRunner:
                 if self._window_ended() or not self._event:
                     old_token_map = {m.outcome: m.token_id for m in self._event.markets} if self._event else {}
 
-                    # Wait for oracle settlement then fetch a clean REST book for
-                    # Poll for oracle settlement (Chainlink settles 1-5s after window
-                    # close). Poll every 1s until both tokens show definitive prices,
-                    # or give up after 10s and default to 0.0 (conservative loss).
                     resolve_prices: dict[str, float] = {}
                     if old_token_map:
-                        deadline = time.time() + 10.0
-                        settled: dict[str, float] = {}
-
-                        while time.time() < deadline:
-                            all_settled = True
+                        end_chainlink = get_btc_price_usd()
+                        ref_btc = self._reference_btc
+                        if end_chainlink is not None and ref_btc is not None:
+                            winner = "Up" if end_chainlink >= ref_btc else "Down"
+                            logger.info(
+                                "Chainlink resolution: ref=%.2f  end=%.2f  winner=%s",
+                                ref_btc, end_chainlink, winner,
+                            )
                             for outcome, tid in old_token_map.items():
-                                if tid in settled:
-                                    continue
-                                book = fetch_book(tid, self.config.clob_api_base)
-                                if book and book.last_trade_price is not None:
-                                    lt = book.last_trade_price
-                                    bid = book.best_bid
-                                    ask = book.best_ask
-                                    if lt >= 0.95 and (ask is None or ask <= 0.05):
-                                        settled[tid] = float(lt)   # confirmed win
-                                    elif lt <= 0.05 and (bid is None or bid <= 0.05):
-                                        settled[tid] = float(lt)   # confirmed loss
-                                    else:
-                                        all_settled = False         # oracle not ready
-                                else:
-                                    all_settled = False
-                            if all_settled and len(settled) == len(old_token_map):
-                                break
-                            time.sleep(1)
-
-                        elapsed = 10.0 - max(0.0, deadline - time.time())
-                        for outcome, tid in old_token_map.items():
-                            resolve_prices[tid] = settled.get(tid, 0.0)
-                        logger.info(
-                            "Settlement resolved in %.1fs: %s",
-                            elapsed,
-                            {tid[:12]: v for tid, v in resolve_prices.items()},
-                        )
+                                resolve_prices[tid] = 1.0 if outcome == winner else 0.0
+                        else:
+                            logger.warning(
+                                "Resolution unavailable (ref_btc=%s, chainlink=%s) — defaulting to loss",
+                                ref_btc, end_chainlink,
+                            )
+                            for outcome, tid in old_token_map.items():
+                                resolve_prices[tid] = 0.0
 
                     self._status_message = "Resolving next 5m window..."
                     ev, msg = discover_btc_5m_event(self.config)
@@ -980,7 +963,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     use_external=cfg.enable_external_data and cfg.enable_binance_ws,
                     move_30s_trigger_usd=cfg.oracle_lag_move_trigger_usd,
                     oracle_gap_trigger_usd=cfg.oracle_lag_gap_trigger_usd,
-                    stale_mid_band=cfg.oracle_lag_stale_mid_band,
                     max_entry_cents=cfg.oracle_lag_max_entry_cents,
                     min_profit_margin=cfg.oracle_lag_min_profit_margin,
                     max_trades_per_window=1,
@@ -1000,10 +982,9 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     buy_amount_usd=cfg.oracle_lag_base_stake_usd,
                     use_external=_use_ext_oracle,
                     entry_start_sec=0.0,
-                    entry_end_sec=30.0,
+                    entry_end_sec=60.0,
                     move_30s_trigger_usd=30.0,
                     oracle_gap_trigger_usd=3.0,
-                    stale_mid_band=cfg.oracle_lag_stale_mid_band,
                     max_entry_cents=cfg.oracle_lag_max_entry_cents,
                     max_trades_per_window=1,
                 ),
@@ -1177,6 +1158,60 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "Late Flat Bet",
                 "late_flat_bet",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                EarlyBreakoutStrategy(
+                    move_30s_trigger_usd=40.0,
+                    max_entry_cents=40,
+                    sell_target_cents=70,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Early Breakout",
+                "early_breakout",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                ConfirmedMomentumCarryStrategy(
+                    min_window_move_usd=35.0,
+                    min_move_30s_usd=10.0,
+                    max_entry_cents=55,
+                    sell_target_cents=80,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Confirmed Momentum Carry",
+                "confirmed_momentum",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                SustainedTrendLockInStrategy(
+                    min_window_move_usd=60.0,
+                    min_move_30s_usd=15.0,
+                    min_entry_cents=40,
+                    max_entry_cents=75,
+                    sell_target_cents=90,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Sustained Trend Lock-In",
+                "sustained_trend",
             )
         )
     else:

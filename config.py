@@ -8,14 +8,14 @@ from dotenv import load_dotenv
 load_dotenv()
 # Trading mode: "paper" (default) or "live"
 TRADING_MODE: str = os.getenv("TRADING_MODE", "paper").lower()
-PAPER_STARTING_BALANCE: float = float(os.getenv("PAPER_STARTING_BALANCE", "100"))
+PAPER_STARTING_BALANCE: float = float(os.getenv("PAPER_STARTING_BALANCE", "20"))
 
 # Strategy params (BTC 5m)
 BUY_THRESHOLD_CENTS: int = int(os.getenv("BUY_THRESHOLD_CENTS", "25"))
 SELL_LIMIT_CENTS: int = int(os.getenv("SELL_LIMIT_CENTS", "40"))
 MAX_BTC_MOVE_USD: float = float(os.getenv("MAX_BTC_MOVE_USD", "100"))
 TIME_WINDOW_SECONDS: int = 2 * 60  # first 2 minutes of 5-min window
-BUY_AMOUNT_USD: float = float(os.getenv("BUY_AMOUNT_USD", "10"))
+BUY_AMOUNT_USD: float = float(os.getenv("BUY_AMOUNT_USD", "1"))
 SMA_WINDOW_TICKS: int = int(os.getenv("SMA_WINDOW_TICKS", "10"))
 SMA_DISCOUNT_CENTS: float = float(os.getenv("SMA_DISCOUNT_CENTS", "5.0"))
 SMA_MAX_ENTRY_CENTS: int = int(os.getenv("SMA_MAX_ENTRY_CENTS", "35"))

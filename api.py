@@ -296,6 +296,136 @@ def outcome_prices():
     return {"ok": True, "slug": ev.slug, "title": ev.title, "outcomes": outcomes}
 
 
+@app.get("/api/safe-mode")
+def safe_mode_get():
+    """Return current safe-mode state and which strategies it affects."""
+    from strategies.advanced import get_safe_mode, SAFE_MODE_STRATEGIES
+    return {"safe_mode": get_safe_mode(), "strategies": sorted(SAFE_MODE_STRATEGIES)}
+
+
+class SafeModeRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/safe-mode")
+def safe_mode_set(body: SafeModeRequest):
+    """Enable or disable the minimum-ask floor across all strategies."""
+    from strategies.advanced import set_safe_mode, get_safe_mode, SAFE_MODE_STRATEGIES
+    set_safe_mode(body.enabled)
+    logger.info("Safe mode set to %s", body.enabled)
+    return {"safe_mode": get_safe_mode(), "strategies": sorted(SAFE_MODE_STRATEGIES)}
+
+
+@app.get("/api/verify-window")
+def verify_window(slug: str = Query(...)):
+    """
+    Proxy: resolve the true winner for a 5-min window slug.
+    The verifier calls this locally so it doesn't need direct internet access.
+    """
+    import json as _json
+    from orderbook import _http_session, fetch_book
+
+    cfg = Config.from_env()
+    result: dict = {"slug": slug, "winner": None, "method": None,
+                    "token_map": {}, "books": {}, "error": None}
+
+    # Pass 1 — Gamma API winner field
+    try:
+        r = _http_session.get(
+            f"{cfg.gamma_api_base.rstrip('/')}/events/slug/{slug}", timeout=12
+        )
+        if r.status_code == 200:
+            ev = r.json()
+            token_map: dict[str, str] = {}
+            gamma_winner: str | None = None
+            for market in (ev.get("markets") or []):
+                raw = market.get("clobTokenIds") or market.get("tokens") or []
+                if isinstance(raw, str):
+                    try:
+                        raw = _json.loads(raw)
+                    except Exception:
+                        raw = []
+                outcomes = market.get("outcomes") or ["Up", "Down"]
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = _json.loads(outcomes)
+                    except Exception:
+                        outcomes = ["Up", "Down"]
+                for i, item in enumerate(raw[:2]):
+                    tid = item.get("token_id") if isinstance(item, dict) else str(item)
+                    out = outcomes[i] if i < len(outcomes) else ("Up" if i == 0 else "Down")
+                    if tid:
+                        token_map[out] = tid
+                # Gamma often sets resolved outcomes through outcomePrices ["1","0"]
+                # while `winner` remains null. Use this as primary resolved signal.
+                op = market.get("outcomePrices")
+                prices = None
+                if isinstance(op, str):
+                    try:
+                        prices = _json.loads(op)
+                    except Exception:
+                        prices = None
+                elif isinstance(op, list):
+                    prices = op
+                if isinstance(prices, list) and len(prices) >= 2:
+                    try:
+                        p0 = float(prices[0])
+                        p1 = float(prices[1])
+                        if p0 >= 0.99 and p1 <= 0.01:
+                            gamma_winner = outcomes[0] if len(outcomes) > 0 else "Up"
+                        elif p1 >= 0.99 and p0 <= 0.01:
+                            gamma_winner = outcomes[1] if len(outcomes) > 1 else "Down"
+                    except (TypeError, ValueError):
+                        pass
+                w = market.get("winner")
+                if w and not gamma_winner:
+                    if w in token_map:
+                        gamma_winner = w
+                    else:
+                        for out, tid in token_map.items():
+                            if tid == w:
+                                gamma_winner = out
+                                break
+            result["token_map"] = token_map
+            if gamma_winner:
+                result.update(winner=gamma_winner, method="gamma")
+                return result
+        else:
+            result["error"] = f"Gamma HTTP {r.status_code}"
+    except Exception as e:
+        result["error"] = str(e)
+
+    # Pass 2 — CLOB books
+    token_map = result.get("token_map") or {}
+    if not token_map:
+        return result
+    books: dict = {}
+    for out, tid in token_map.items():
+        book = fetch_book(tid, cfg.clob_api_base)
+        if book:
+            books[out] = {
+                "last_trade": book.last_trade_price,
+                "best_bid": book.best_bid,
+                "best_ask": book.best_ask,
+            }
+    result["books"] = books
+    # Strict: last_trade >= 0.95 AND ask collapsed
+    for out, b in books.items():
+        lt, ask = b.get("last_trade"), b.get("best_ask")
+        if lt is not None and lt >= 0.95 and (ask is None or ask <= 0.05):
+            result.update(winner=out, method="clob_strict")
+            return result
+    # Loose: last_trade >= 0.95 only
+    for out, b in books.items():
+        lt = b.get("last_trade")
+        if lt is not None and lt >= 0.95:
+            result.update(winner=out, method="clob_loose")
+            return result
+
+    result["error"] = (result.get("error") or "") + " | no winner found in CLOB"
+    return result
+
+
 @app.get("/api/init-check")
 def init_check():
     """Resolve BTC 5m event without starting (for UI before Start)."""
