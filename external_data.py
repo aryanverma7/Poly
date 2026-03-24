@@ -162,6 +162,7 @@ class ExternalDataService:
                     while not self._stop.is_set():
                         with self._lock:
                             if version != self._clob_sub_version:
+                                self._clob_ws_connected = False
                                 break
                         msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         data = json.loads(msg)
@@ -329,7 +330,9 @@ class ExternalDataService:
                     if px is not None:
                         with self._lock:
                             self._last_local_btc = float(px)
-                    next_btc = now + 1.0
+                        next_btc = now + 1.0
+                    else:
+                        next_btc = now + 5.0  # back off on fetch failure
                 if now >= next_chainlink:
                     self._refresh_chainlink_price(now)
                     next_chainlink = now + self._chainlink_ttl

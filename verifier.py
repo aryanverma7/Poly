@@ -33,7 +33,7 @@ import requests
 # ── Config ──────────────────────────────────────────────────────────────────
 GAMMA_BASE   = "https://gamma-api.polymarket.com"
 CLOB_BASE    = "https://clob.polymarket.com"
-BOT_API_BASE = "http://192.168.1.18:8000"   # change if your IP differs
+BOT_API_BASE = "http://127.0.0.1:8000"
 LOG_DIR      = Path(__file__).parent         # where trades_log_*.md files live
 REPORT_FILE  = LOG_DIR / "verifier_report.md"
 

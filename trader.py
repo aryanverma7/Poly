@@ -378,7 +378,7 @@ class StrategyRunner:
                             if rt["consecutive_losses"] >= self.config.max_consecutive_losses:
                                 rt["cooldown_windows_remaining"] = self.config.cooldown_windows_after_losses
                                 rt["consecutive_losses"] = 0
-                    _CIRCUIT_EXEMPT = {"oracle_lag_proxy", "oracle_lag_early", "micro_mm_proxy"}
+                    _CIRCUIT_EXEMPT = {"oracle_lag_proxy", "oracle_lag_early", "late_confidence"}
                     loss_count = sum(
                         1 for _, _, _, _, sfx in self._lanes
                         if self._lane_runtime.get(sfx, {}).get("last_window_pnl", 0) < -1e-9
@@ -663,7 +663,7 @@ class StrategyRunner:
         all_trades = list(state.trades or [])
         all_trades.reverse()
         start = max(0, int(offset))
-        end = max(start, start + max(1, min(int(limit), 500)))
+        end = max(start, start + max(1, min(int(limit), 10000)))
         return {
             "id": suffix,
             "total": len(all_trades),
@@ -679,7 +679,7 @@ class StrategyRunner:
         _strategy, _executor, state, _label, suffix = lane
         rows = self._build_roundtrips(list(state.trades or []))
         start = max(0, int(offset))
-        end = max(start, start + max(1, min(int(limit), 500)))
+        end = max(start, start + max(1, min(int(limit), 10000)))
         return {
             "id": suffix,
             "total": len(rows),

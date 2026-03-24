@@ -303,6 +303,7 @@ class PaperExecutor(Executor):
                         order_id=tag,
                     )
                 )
+                self._balance += revenue
                 pnl = revenue - cost
                 logger.info(
                     "Paper settle: %s @ %.2f → revenue $%.2f, P&L $%.2f for %s",

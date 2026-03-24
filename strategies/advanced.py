@@ -9,7 +9,6 @@ internal proxies so they can be A/B tested immediately in paper mode.
 from __future__ import annotations
 
 import logging
-import time
 from collections import deque
 from typing import Optional
 

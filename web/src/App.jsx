@@ -49,7 +49,7 @@ function formatUsd(v, signed = false) {
 
 function toDate(iso) {
   if (!iso) return null
-  const normalized = /[Z+\-]\d*$/.test(iso) ? iso : iso + 'Z'
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z'
   const d = new Date(normalized)
   return Number.isNaN(d.getTime()) ? null : d
 }
@@ -76,13 +76,13 @@ function formatLastPoll(iso) {
   if (sec < 0) return 'just now'
   if (sec < 90) return `${sec}s ago`
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return new Date(iso).toLocaleTimeString()
+  return new Date(t).toLocaleTimeString()
 }
 
 function asUtcMs(iso) {
   if (!iso) return NaN
   // If there's no timezone indicator, the string is UTC from the backend — force it
-  const normalized = /[Z+\-]\d*$/.test(iso) ? iso : iso + 'Z'
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z'
   return new Date(normalized).getTime()
 }
 
@@ -240,8 +240,8 @@ export default function App() {
     (strategyIds) => {
       for (const sid of strategyIds) {
         Promise.all([
-          fetch(api(`/api/strategy/${sid}/trades?offset=0&limit=10000`)).then((r) => r.json()),
-          fetch(api(`/api/strategy/${sid}/roundtrips?offset=0&limit=10000`)).then((r) => r.json()),
+          fetch(api(`/api/strategy/${sid}/trades?offset=0&limit=10000`)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() }),
+          fetch(api(`/api/strategy/${sid}/roundtrips?offset=0&limit=10000`)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() }),
         ]).then(([tradesRes, roundtripsRes]) => {
           setStrategyData((p) => ({
             ...p,
@@ -489,7 +489,7 @@ export default function App() {
   return (
     <div className="app">
       {sidebarOpen && <div className="sidebar-overlay" role="button" tabIndex={0} onClick={() => setSidebarOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setSidebarOpen(false)} />}
-      <nav className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+      <nav id="sidebar" className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <strong>Navigation</strong>
           <button type="button" className="sidebar-close" aria-label="Close menu" onClick={() => setSidebarOpen(false)}>×</button>
@@ -542,6 +542,7 @@ export default function App() {
           <div
             className={`switch ${safeMode ? 'on' : ''}`}
             onClick={toggleSafeMode}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleSafeMode()}
             role="button"
             tabIndex={0}
             title={
