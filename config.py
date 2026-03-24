@@ -6,7 +6,6 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
-
 # Trading mode: "paper" (default) or "live"
 TRADING_MODE: str = os.getenv("TRADING_MODE", "paper").lower()
 PAPER_STARTING_BALANCE: float = float(os.getenv("PAPER_STARTING_BALANCE", "20"))
@@ -16,26 +15,28 @@ BUY_THRESHOLD_CENTS: int = int(os.getenv("BUY_THRESHOLD_CENTS", "25"))
 SELL_LIMIT_CENTS: int = int(os.getenv("SELL_LIMIT_CENTS", "40"))
 MAX_BTC_MOVE_USD: float = float(os.getenv("MAX_BTC_MOVE_USD", "100"))
 TIME_WINDOW_SECONDS: int = 2 * 60  # first 2 minutes of 5-min window
-BUY_AMOUNT_USD: float = float(os.getenv("BUY_AMOUNT_USD", "4"))
+BUY_AMOUNT_USD: float = float(os.getenv("BUY_AMOUNT_USD", "1"))
 SMA_WINDOW_TICKS: int = int(os.getenv("SMA_WINDOW_TICKS", "10"))
-SMA_DISCOUNT_CENTS: float = float(os.getenv("SMA_DISCOUNT_CENTS", "2"))
+SMA_DISCOUNT_CENTS: float = float(os.getenv("SMA_DISCOUNT_CENTS", "5.0"))
 SMA_MAX_ENTRY_CENTS: int = int(os.getenv("SMA_MAX_ENTRY_CENTS", "35"))
 
-# Advanced strategy knobs (so lanes actually trigger)
-END_WINDOW_MOVE_TRIGGER_USD: float = float(os.getenv("END_WINDOW_MOVE_TRIGGER_USD", "40"))
-END_WINDOW_MAX_ENTRY_CENTS: int = int(os.getenv("END_WINDOW_MAX_ENTRY_CENTS", "75"))
+# Advanced strategy knobs
+END_WINDOW_MOVE_TRIGGER_USD: float = float(os.getenv("END_WINDOW_MOVE_TRIGGER_USD", "80"))
+END_WINDOW_MAX_ENTRY_CENTS: int = int(os.getenv("END_WINDOW_MAX_ENTRY_CENTS", "55"))
 ORACLE_LAG_MOVE_TRIGGER_USD: float = float(os.getenv("ORACLE_LAG_MOVE_TRIGGER_USD", "20"))
-ORACLE_LAG_GAP_TRIGGER_USD: float = float(os.getenv("ORACLE_LAG_GAP_TRIGGER_USD", "2"))
-ORACLE_LAG_STALE_MID_BAND: float = float(os.getenv("ORACLE_LAG_STALE_MID_BAND", "0.12"))
+ORACLE_LAG_GAP_TRIGGER_USD: float = float(os.getenv("ORACLE_LAG_GAP_TRIGGER_USD", "3"))
+ORACLE_LAG_STALE_MID_BAND: float = float(os.getenv("ORACLE_LAG_STALE_MID_BAND", "0.08"))
 ORACLE_LAG_MAX_ENTRY_CENTS: int = int(os.getenv("ORACLE_LAG_MAX_ENTRY_CENTS", "70"))
-END_WINDOW_SELL_LIMIT_CENTS: int = int(os.getenv("END_WINDOW_SELL_LIMIT_CENTS", "80"))
-HYBRID_MOMENTUM_TRIGGER_USD: float = float(os.getenv("HYBRID_MOMENTUM_TRIGGER_USD", "20"))
+ORACLE_LAG_BASE_STAKE_USD: float = float(os.getenv("ORACLE_LAG_BASE_STAKE_USD", "5"))
+ORACLE_LAG_MIN_PROFIT_MARGIN: float = float(os.getenv("ORACLE_LAG_MIN_PROFIT_MARGIN", "0.30"))
+END_WINDOW_SELL_LIMIT_CENTS: int = int(os.getenv("END_WINDOW_SELL_LIMIT_CENTS", "85"))
+HYBRID_MOMENTUM_TRIGGER_USD: float = float(os.getenv("HYBRID_MOMENTUM_TRIGGER_USD", "15"))
 HYBRID_ATR_MIN_USD: float = float(os.getenv("HYBRID_ATR_MIN_USD", "40"))
-HYBRID_MAX_ENTRY_CENTS: int = int(os.getenv("HYBRID_MAX_ENTRY_CENTS", "35"))
-MAX_CONSECUTIVE_LOSSES: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5"))
-COOLDOWN_WINDOWS_AFTER_LOSSES: int = int(os.getenv("COOLDOWN_WINDOWS_AFTER_LOSSES", "2"))
+HYBRID_MAX_ENTRY_CENTS: int = int(os.getenv("HYBRID_MAX_ENTRY_CENTS", "25"))
+MAX_CONSECUTIVE_LOSSES: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
+COOLDOWN_WINDOWS_AFTER_LOSSES: int = int(os.getenv("COOLDOWN_WINDOWS_AFTER_LOSSES", "3"))
 STAKE_MIN_MULT: float = float(os.getenv("STAKE_MIN_MULT", "0.25"))
-STAKE_MAX_MULT: float = float(os.getenv("STAKE_MAX_MULT", "16"))
+STAKE_MAX_MULT: float = float(os.getenv("STAKE_MAX_MULT", "4"))
 
 # Event slug pattern for discovery
 EVENT_SLUG_CONTAINS: str = os.getenv("EVENT_SLUG_CONTAINS", "btc-updown-5m")
@@ -70,6 +71,8 @@ class Config:
     oracle_lag_gap_trigger_usd: float
     oracle_lag_stale_mid_band: float
     oracle_lag_max_entry_cents: int
+    oracle_lag_base_stake_usd: float
+    oracle_lag_min_profit_margin: float
     end_window_sell_limit_cents: int
     hybrid_momentum_trigger_usd: float
     hybrid_atr_min_usd: float
@@ -110,6 +113,8 @@ class Config:
             oracle_lag_gap_trigger_usd=ORACLE_LAG_GAP_TRIGGER_USD,
             oracle_lag_stale_mid_band=ORACLE_LAG_STALE_MID_BAND,
             oracle_lag_max_entry_cents=ORACLE_LAG_MAX_ENTRY_CENTS,
+            oracle_lag_base_stake_usd=ORACLE_LAG_BASE_STAKE_USD,
+            oracle_lag_min_profit_margin=ORACLE_LAG_MIN_PROFIT_MARGIN,
             end_window_sell_limit_cents=END_WINDOW_SELL_LIMIT_CENTS,
             hybrid_momentum_trigger_usd=HYBRID_MOMENTUM_TRIGGER_USD,
             hybrid_atr_min_usd=HYBRID_ATR_MIN_USD,

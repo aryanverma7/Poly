@@ -8,6 +8,8 @@ import requests
 from config import Config
 
 logger = logging.getLogger(__name__)
+_http_session = requests.Session()
+_http_session.headers.update({"Connection": "keep-alive"})
 
 
 @dataclass
@@ -44,7 +46,7 @@ def fetch_book(token_id: str, base_url: Optional[str] = None) -> Optional[OrderB
     base_url = (base_url or Config.from_env().clob_api_base).rstrip("/")
     url = f"{base_url}/book"
     try:
-        r = requests.get(url, params={"token_id": token_id}, timeout=10)
+        r = _http_session.get(url, params={"token_id": token_id}, timeout=10)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -84,13 +86,40 @@ def fetch_book(token_id: str, base_url: Optional[str] = None) -> Optional[OrderB
     )
 
 
+def get_chainlink_btc_usd() -> Optional[float]:
+    """Fetch Chainlink BTC/USD price from Polygon — Polymarket's actual resolution source."""
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+                    "data": "0x50d25bcd",
+                },
+                "latest",
+            ],
+            "id": 1,
+        }
+        r = _http_session.post("https://polygon-rpc.com", json=payload, timeout=3)
+        result = r.json().get("result")
+        if result:
+            return int(result, 16) / 1e8
+    except Exception as e:
+        logger.debug("Chainlink BTC/USD fetch failed: %s", e)
+    return None
+
+
 def get_btc_price_usd() -> Optional[float]:
     """
-    Fetch current BTC/USD price for the guard. Uses a free API; for production
-    use Chainlink (Polymarket resolution source) if available.
+    Fetch current BTC/USD price for the guard.
+    Tries Chainlink (Polymarket resolution source) first, falls back to CoinGecko.
     """
+    price = get_chainlink_btc_usd()
+    if price is not None and price > 100:
+        return price
     try:
-        r = requests.get(
+        r = _http_session.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
             timeout=5,
         )

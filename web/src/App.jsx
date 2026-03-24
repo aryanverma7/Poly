@@ -8,10 +8,11 @@ import {
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend)
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
 
 const api = (path) => path
 
@@ -48,7 +49,8 @@ function formatUsd(v, signed = false) {
 
 function toDate(iso) {
   if (!iso) return null
-  const d = new Date(iso)
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z'
+  const d = new Date(normalized)
   return Number.isNaN(d.getTime()) ? null : d
 }
 
@@ -68,17 +70,51 @@ function formatEtWindow(iso) {
 
 function formatLastPoll(iso) {
   if (!iso) return '—'
-  const t = new Date(iso).getTime()
+  const t = asUtcMs(iso)
   if (Number.isNaN(t)) return iso
   const sec = Math.round((Date.now() - t) / 1000)
   if (sec < 0) return 'just now'
   if (sec < 90) return `${sec}s ago`
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return new Date(iso).toLocaleTimeString()
+  return new Date(t).toLocaleTimeString()
+}
+
+function asUtcMs(iso) {
+  if (!iso) return NaN
+  // If there's no timezone indicator, the string is UTC from the backend — force it
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z'
+  return new Date(normalized).getTime()
+}
+
+function formatUptime(isoStart) {
+  if (!isoStart) return '—'
+  const t = asUtcMs(isoStart)
+  if (Number.isNaN(t)) return '—'
+  const totalSec = Math.max(0, Math.round((Date.now() - t) / 1000))
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (h > 0) return `${h}h ${m.toString().padStart(2, '0')}m ${s.toString().padStart(2, '0')}s`
+  return `${m}m ${s.toString().padStart(2, '0')}s`
+}
+
+function formatWindowCountdown() {
+  const now = Date.now()
+  const windowMs = 5 * 60 * 1000
+  const elapsed = now % windowMs
+  const remaining = Math.ceil((windowMs - elapsed) / 1000)
+  const m = Math.floor(remaining / 60)
+  const s = remaining % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function windowElapsedSec() {
+  return Math.floor((Date.now() % (5 * 60 * 1000)) / 1000)
 }
 
 function readPageFromHash() {
   const raw = window.location.hash || '#/home'
+  if (raw === '#/all') return { type: 'all' }
   if (raw.startsWith('#/strategy/')) {
     const strategyId = decodeURIComponent(raw.replace('#/strategy/', ''))
     return { type: 'strategy', strategyId }
@@ -87,6 +123,7 @@ function readPageFromHash() {
 }
 
 function buildHash(page) {
+  if (page.type === 'all') return '#/all'
   if (page.type === 'strategy' && page.strategyId) return `#/strategy/${encodeURIComponent(page.strategyId)}`
   return '#/home'
 }
@@ -100,8 +137,33 @@ export default function App() {
   const [bookPrices, setBookPrices] = useState({ outcomes: {}, slug: null })
   const [page, setPage] = useState(() => readPageFromHash())
   const [strategyData, setStrategyData] = useState({})
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [safeMode, setSafeMode] = useState(true)
+  const [safeModeStrategies, setSafeModeStrategies] = useState([])
   const tickRef = useRef(null)
   const [, setTick] = useState(0)
+
+  const loadSafeMode = useCallback(async () => {
+    try {
+      const r = await fetch(api('/api/safe-mode'))
+      const d = await r.json()
+      setSafeMode(d.safe_mode)
+      setSafeModeStrategies(d.strategies || [])
+    } catch (e) { console.warn('safe-mode fetch', e) }
+  }, [])
+
+  const toggleSafeMode = useCallback(async () => {
+    const next = !safeMode
+    try {
+      const r = await fetch(api('/api/safe-mode'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      const d = await r.json()
+      setSafeMode(d.safe_mode)
+    } catch (e) { console.warn('safe-mode toggle', e) }
+  }, [safeMode])
 
   const loadInit = useCallback(async () => {
     try {
@@ -174,6 +236,28 @@ export default function App() {
     [loadStrategyChunk, strategyData]
   )
 
+  const loadAllStrategyData = useCallback(
+    (strategyIds) => {
+      for (const sid of strategyIds) {
+        Promise.all([
+          fetch(api(`/api/strategy/${sid}/trades?offset=0&limit=10000`)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() }),
+          fetch(api(`/api/strategy/${sid}/roundtrips?offset=0&limit=10000`)).then((r) => { if (!r.ok) throw new Error(r.status); return r.json() }),
+        ]).then(([tradesRes, roundtripsRes]) => {
+          setStrategyData((p) => ({
+            ...p,
+            [sid]: {
+              ...(p[sid] || {}),
+              allLoaded: true,
+              trades: { loading: false, total: toNum(tradesRes.total, 0), items: tradesRes.items || [] },
+              roundtrips: { loading: false, total: toNum(roundtripsRes.total, 0), items: roundtripsRes.items || [] },
+            },
+          }))
+        }).catch((e) => console.warn(`Failed loading all data for ${sid}`, e))
+      }
+    },
+    []
+  )
+
   const loadOutcomePrices = useCallback(async () => {
     try {
       const r = await fetch(api('/api/outcome-prices'))
@@ -189,7 +273,8 @@ export default function App() {
   useEffect(() => {
     loadInit()
     loadState()
-  }, [loadInit, loadState])
+    loadSafeMode()
+  }, [loadInit, loadState, loadSafeMode])
 
   useEffect(() => {
     const onHash = () => setPage(readPageFromHash())
@@ -227,14 +312,34 @@ export default function App() {
     return () => clearInterval(id)
   }, [loadState])
 
+  const s = state || {}
+  const strategies = s.strategies || []
+
+  useEffect(() => {
+    if ((page.type === 'all' || page.type === 'home') && strategies.length > 0) {
+      loadAllStrategyData(strategies.map((st) => st.id))
+    }
+  }, [page.type, strategies.length, loadAllStrategyData])
+
+  // Auto-refresh trade tables every 10s while running
+  useEffect(() => {
+    if (!s.running || strategies.length === 0) return
+    const ids =
+      (page.type === 'all' || page.type === 'home')
+        ? strategies.map((st) => st.id)
+        : page.type === 'strategy' && page.strategyId
+        ? [page.strategyId]
+        : []
+    if (ids.length === 0) return
+    const id = setInterval(() => loadAllStrategyData(ids), 10000)
+    return () => clearInterval(id)
+  }, [s.running, page.type, page.strategyId, strategies.length, loadAllStrategyData])
+
   useEffect(() => {
     if (page.type !== 'strategy' || !page.strategyId) return
-    const d = strategyData[page.strategyId]
-    const hasTrades = toNum(d?.trades?.items?.length, 0) > 0
-    const hasRoundtrips = toNum(d?.roundtrips?.items?.length, 0) > 0
-    if (!hasTrades) loadMoreStrategy(page.strategyId, 'trades', true)
-    if (!hasRoundtrips) loadMoreStrategy(page.strategyId, 'roundtrips', true)
-  }, [page, strategyData, loadMoreStrategy])
+    loadMoreStrategy(page.strategyId, 'trades', true)
+    loadMoreStrategy(page.strategyId, 'roundtrips', true)
+  }, [page.strategyId])
 
   useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 1000)
@@ -273,13 +378,12 @@ export default function App() {
       setErr(String(e.message))
     }
   }
-
-  const s = state || {}
-  const strategies = s.strategies || []
   const selectedStrategy = useMemo(
     () => strategies.find((st) => st.id === page.strategyId) || null,
     [strategies, page.strategyId]
   )
+
+  const [lbSort, setLbSort] = useState({ col: 'pnl', dir: 'desc' })
 
   const leaderboard = useMemo(
     () =>
@@ -297,10 +401,31 @@ export default function App() {
           cooldownWindows: toNum(st.cooldown_windows_remaining, 0),
           lastReject: String(st.last_rejection_reason || ''),
           stakeUsd: toNum(st.stake_usd, 0),
+          winRate: (() => {
+            const trips = strategyData[st.id]?.roundtrips?.items || []
+            if (!trips.length) return null
+            const wins = trips.filter(r => toNum(r.pnl_usd) > 0).length
+            return Math.round((wins / trips.length) * 100)
+          })(),
         }))
-        .sort((a, b) => b.pnl - a.pnl),
-    [strategies]
+        .sort((a, b) => {
+          const { col, dir } = lbSort
+          const mult = dir === 'asc' ? 1 : -1
+          if (col === 'label') return mult * a.label.localeCompare(b.label)
+          const av = a[col] ?? -Infinity
+          const bv = b[col] ?? -Infinity
+          return mult * (av - bv)
+        }),
+    [strategies, strategyData, lbSort]
   )
+
+  const handleLbSort = (col) => {
+    setLbSort((prev) =>
+      prev.col === col
+        ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { col, dir: 'asc' }
+    )
+  }
 
   const comparisonChartData = useMemo(() => {
     if (!strategies.some((st) => (st.equity_curve || []).length > 0)) return null
@@ -359,21 +484,43 @@ export default function App() {
   const canLoadMoreTrades = detailTrades.length < detailTradesTotal
   const canLoadMoreRoundtrips = detailRoundtrips.length < detailRoundtripsTotal
 
+  const navTo = (p) => { setPage(p); setSidebarOpen(false) }
+
   return (
     <div className="app">
-      <h1>Polymarket Bitcoin 5m Strategy</h1>
-      <p className="muted">Home has overview + leaderboard. Open any strategy for full details and history.</p>
-
-      <div className="controls" style={{ marginTop: 12 }}>
-        <button
-          type="button"
-          className={page.type === 'home' ? 'primary' : ''}
-          onClick={() => setPage({ type: 'home' })}
-        >
+      {sidebarOpen && <div className="sidebar-overlay" role="button" tabIndex={0} onClick={() => setSidebarOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setSidebarOpen(false)} />}
+      <nav id="sidebar" className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <strong>Navigation</strong>
+          <button type="button" className="sidebar-close" aria-label="Close menu" onClick={() => setSidebarOpen(false)}>×</button>
+        </div>
+        <button type="button" className={`sidebar-item ${page.type === 'home' ? 'active' : ''}`} onClick={() => navTo({ type: 'home' })}>
           Home
         </button>
+        <button type="button" className={`sidebar-item ${page.type === 'all' ? 'active' : ''}`} onClick={() => navTo({ type: 'all' })}>
+          All (screenshot view)
+        </button>
+        {leaderboard.map((row) => (
+          <button
+            type="button"
+            key={row.id}
+            className={`sidebar-item ${page.type === 'strategy' && page.strategyId === row.id ? 'active' : ''}`}
+            onClick={() => navTo({ type: 'strategy', strategyId: row.id })}
+          >
+            <span className="sidebar-item-label">{row.label}</span>
+            <span className={row.pnl >= 0 ? 'positive' : 'negative'}>{formatUsd(row.pnl, true)}</span>
+          </button>
+        ))}
+      </nav>
+
+      <div className="top-bar">
+        <button type="button" className="menu-toggle" aria-label="Open menu" aria-expanded={sidebarOpen} aria-controls="sidebar" onClick={() => setSidebarOpen((v) => !v)}>☰</button>
+        <h1>Polymarket BTC 5m Strategy</h1>
+        {page.type === 'all' && (
+          <span className="muted" style={{ marginLeft: 12 }}>All strategies (screenshot view)</span>
+        )}
         {page.type === 'strategy' && selectedStrategy && (
-          <span className="muted">Viewing: {selectedStrategy.label || selectedStrategy.id}</span>
+          <span className="muted" style={{ marginLeft: 12 }}>{selectedStrategy.label || selectedStrategy.id}</span>
         )}
       </div>
 
@@ -389,6 +536,24 @@ export default function App() {
             role="button"
             tabIndex={0}
           />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="muted">Safe mode</span>
+          <div
+            className={`switch ${safeMode ? 'on' : ''}`}
+            onClick={toggleSafeMode}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleSafeMode()}
+            role="button"
+            tabIndex={0}
+            title={
+              safeMode
+                ? `ON — strategies refuse entries below floor price.\nAffects: ${safeModeStrategies.join(', ')}`
+                : `OFF — no floor price restriction on any strategy`
+            }
+          />
+          <span className={`badge ${safeMode ? 'paper' : 'live'}`} style={{ fontSize: 11 }}>
+            {safeMode ? 'ON' : 'OFF'}
+          </span>
         </div>
         <button type="button" className="primary" disabled={s.running || !init?.ok} onClick={onStart}>
           Start Strategy
@@ -418,7 +583,7 @@ export default function App() {
         </div>
       )}
 
-      {page.type === 'home' ? (
+      {page.type === 'home' || page.type === 'all' ? (
         <>
           <div className="card status-bar">
             <label>{s.running ? 'Current market' : 'Market (before start)'}</label>
@@ -459,6 +624,29 @@ export default function App() {
             </div>
           </div>
 
+          <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div className="card status-bar" style={{ margin: 0 }}>
+              <label>Session uptime</label>
+              <div className="value mono" style={{ fontSize: '1.35rem', letterSpacing: 1 }}>
+                {s.running && s.session_start ? formatUptime(s.session_start) : '—'}
+              </div>
+              {s.running && s.session_start && (
+                <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                  Started {formatIstTime(s.session_start)}
+                </div>
+              )}
+            </div>
+            <div className="card status-bar" style={{ margin: 0 }}>
+              <label>Window ends in</label>
+              <div className="value mono" style={{ fontSize: '1.35rem', letterSpacing: 1 }}>
+                {formatWindowCountdown()}
+              </div>
+              <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
+                {windowElapsedSec()}s elapsed of 300s
+              </div>
+            </div>
+          </div>
+
           <div className="card status-bar">
             <label>External data (Binance)</label>
             <div className="muted" style={{ marginTop: 4 }}>
@@ -482,6 +670,24 @@ export default function App() {
               <strong>Depth imb:</strong> {s.external_snapshot?.binance_depth_imbalance != null ? Number(s.external_snapshot.binance_depth_imbalance).toFixed(2) : '—'}
               {' · '}
               <strong>Oracle gap:</strong> {s.external_snapshot?.oracle_gap_usd != null ? Number(s.external_snapshot.oracle_gap_usd).toFixed(2) : 'waiting for local BTC price'}
+            </div>
+          </div>
+
+          <div className="card status-bar">
+            <label>Diagnostics</label>
+            <div className="muted" style={{ marginTop: 4 }}>
+              <strong>Main loop:</strong> avg {toNum(s.main_loop_cycle_ms_avg, 0).toFixed(1)}ms · last {toNum(s.main_loop_cycle_ms_last, 0).toFixed(1)}ms
+            </div>
+            <div className="muted" style={{ marginTop: 4 }}>
+              <strong>CLOB WS:</strong> {s.clob_ws_connected ? 'connected' : 'disconnected'}
+              {s.clob_last_update_age_sec != null ? ` · last update ${toNum(s.clob_last_update_age_sec, 0).toFixed(1)}s ago` : ' · last update —'}
+              {s.clob_last_error_msg ? <div style={{ marginTop: 4, color: '#ef4444', fontSize: 12 }}>Error: {s.clob_last_error_msg}</div> : null}
+            </div>
+            <div className="muted" style={{ marginTop: 4 }}>
+              <strong>Urgent wakes (60s):</strong> {toNum(s.urgent_wake_count_60s, 0)}
+            </div>
+            <div className="muted" style={{ marginTop: 4 }}>
+              <strong>REST book fetches (loop):</strong> {toNum(s.last_rest_fetches, 0)}
             </div>
           </div>
 
@@ -512,18 +718,41 @@ export default function App() {
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>Strategy</th>
-                  <th>P&amp;L</th>
-                  <th>ROI</th>
-                  <th>Trades</th>
+                  {[
+                    { col: 'label',    label: 'Strategy' },
+                    { col: 'pnl',      label: 'P&L' },
+                    { col: 'roiPct',   label: 'ROI' },
+                    { col: 'trades',   label: 'Trades' },
+                    { col: 'winRate',  label: 'Win %' },
+                  ].map(({ col, label }) => (
+                    <th
+                      key={col}
+                      onClick={() => handleLbSort(col)}
+                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                    >
+                      {label}
+                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                    </th>
+                  ))}
                   <th>Cap/window</th>
                   <th>Loss streak</th>
                   <th>Cooldown</th>
                   <th>Last reject reason</th>
-                  <th>Stake</th>
-                  <th>Invested</th>
-                  <th>Balance</th>
-                  <th>Page</th>
+                  {[
+                    { col: 'stakeUsd', label: 'Stake' },
+                    { col: 'invested', label: 'Invested' },
+                    { col: 'balance',  label: 'Balance' },
+                  ].map(({ col, label }) => (
+                    <th
+                      key={col}
+                      onClick={() => handleLbSort(col)}
+                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                    >
+                      {label}
+                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                    </th>
+                  ))}
+                  {page.type !== 'all' && <th>Page</th>}
                 </tr>
               </thead>
               <tbody>
@@ -536,6 +765,7 @@ export default function App() {
                     </td>
                     <td className={row.roiPct >= 0 ? 'positive' : 'negative'}>{row.roiPct.toFixed(2)}%</td>
                     <td>{row.trades}</td>
+                    <td>{row.winRate != null ? `${row.winRate}%` : '—'}</td>
                     <td>{row.maxTradesPerWindow}</td>
                     <td>{row.consecutiveLosses}</td>
                     <td>{row.cooldownWindows}</td>
@@ -543,11 +773,13 @@ export default function App() {
                     <td>{formatUsd(row.stakeUsd)}</td>
                     <td>{formatUsd(row.invested)}</td>
                     <td>{formatUsd(row.balance)}</td>
-                    <td>
-                      <button type="button" onClick={() => setPage({ type: 'strategy', strategyId: row.id })}>
-                        Open
-                      </button>
-                    </td>
+                    {page.type !== 'all' && (
+                      <td>
+                        <button type="button" onClick={() => setPage({ type: 'strategy', strategyId: row.id })}>
+                          Open
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -583,6 +815,122 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {page.type === 'all' && strategies.map((st) => {
+            const stData = strategyData[st.id] || {}
+            const stTrades = stData.trades?.items || []
+            const stRoundtrips = stData.roundtrips?.items || []
+            const stPnl = toNum(st.session_profit, 0)
+            const stRoi = toNum(st.roi_pct, 0)
+            const stCurve = st.equity_curve || []
+            const stChartData = stCurve.length > 0 ? {
+              labels: stCurve.map(([t]) => t),
+              datasets: [{
+                label: 'Balance',
+                data: stCurve.map(([, b]) => b),
+                borderColor: '#3b82f6',
+                backgroundColor: 'rgba(59, 130, 246, 0.16)',
+                fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2,
+              }],
+            } : null
+            return (
+              <div key={st.id} className="all-strategy-section">
+                <h2 className="section-title" style={{ borderBottom: '2px solid var(--accent)', paddingBottom: 6 }}>
+                  {st.label || st.id}
+                  <span className={stPnl >= 0 ? 'positive' : 'negative'} style={{ marginLeft: 12, fontSize: '0.95rem' }}>
+                    {formatUsd(stPnl, true)}
+                  </span>
+                  <span className="muted" style={{ marginLeft: 8, fontSize: '0.85rem' }}>
+                    ROI {stRoi.toFixed(2)}%
+                  </span>
+                </h2>
+
+                <div className="grid">
+                  <div className="card"><label>Balance</label><div className="value">{formatUsd(st.balance)}</div></div>
+                  <div className="card"><label>Trades</label><div className="value">{toNum(st.session_trade_count)}</div></div>
+                  <div className="card"><label>Cap/window</label><div className="value">{toNum(st.max_trades_per_window)}</div></div>
+                  <div className="card"><label>Loss streak</label><div className="value">{toNum(st.consecutive_losses)}</div></div>
+                  <div className="card"><label>Cooldown</label><div className="value">{toNum(st.cooldown_windows_remaining)}</div></div>
+                  <div className="card"><label>Stake</label><div className="value">{formatUsd(st.stake_usd)}</div></div>
+                  <div className="card"><label>Last reject</label><div className="value" style={{ fontSize: '0.85rem' }}>{st.last_rejection_reason || '—'}</div></div>
+                </div>
+
+                {stChartData && (
+                  <div className="card chart-wrap clean-chart">
+                    <label>Equity curve</label>
+                    <div style={{ height: 220 }}>
+                      <Line
+                        data={stChartData}
+                        options={{
+                          responsive: true, maintainAspectRatio: false,
+                          interaction: { mode: 'index', intersect: false },
+                          plugins: { legend: { display: false } },
+                          scales: {
+                            x: { ticks: { maxTicksLimit: 10, callback: (_, idx) => formatIstTime(stChartData.labels[idx]) }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                            y: { ticks: { callback: (v) => `$${Number(v).toFixed(0)}` }, grid: { color: 'rgba(255,255,255,0.08)' } },
+                          },
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="card">
+                  <label>Trade lifecycle (buy + sell) — {stRoundtrips.length} roundtrips{!stData.allLoaded ? ' (loading...)' : ''}</label>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Outcome</th>
+                        <th>Buy</th>
+                        <th>Sell</th>
+                        <th>Size</th>
+                        <th>P&amp;L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stRoundtrips.length === 0 ? (
+                        <tr><td colSpan={5} className="muted" style={{ textAlign: 'center' }}>{stData.allLoaded ? 'No roundtrips' : 'Loading...'}</td></tr>
+                      ) : stRoundtrips.map((r) => (
+                        <tr key={r.id}>
+                          <td>{r.outcome || '—'}</td>
+                          <td>{toNum(r.buy_price).toFixed(2)}</td>
+                          <td>{toNum(r.sell_price).toFixed(2)}</td>
+                          <td>{toNum(r.size).toFixed(2)}</td>
+                          <td className={toNum(r.pnl_usd) >= 0 ? 'positive' : 'negative'}>{formatUsd(r.pnl_usd, true)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="card">
+                  <label>All trades — {stTrades.length} fills{!stData.allLoaded ? ' (loading...)' : ''}</label>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Side</th>
+                        <th>Outcome</th>
+                        <th>Price</th>
+                        <th>USD</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stTrades.length === 0 ? (
+                        <tr><td colSpan={4} className="muted" style={{ textAlign: 'center' }}>{stData.allLoaded ? 'No trades' : 'Loading...'}</td></tr>
+                      ) : stTrades.map((t, i) => (
+                        <tr key={`${t.ts || 't'}-${i}`}>
+                          <td>{t.side || '—'}</td>
+                          <td>{t.outcome || '—'}</td>
+                          <td>{toNum(t.price).toFixed(2)}</td>
+                          <td>{formatUsd(t.amount_usd)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )
+          })}
         </>
       ) : selectedStrategy ? (
         <>
@@ -662,8 +1010,6 @@ export default function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>Time (IST)</th>
-                    <th>BTC window (ET)</th>
                     <th>Side</th>
                     <th>Outcome</th>
                     <th>Price</th>
@@ -673,8 +1019,6 @@ export default function App() {
                 <tbody>
                   {detailTrades.map((t, i) => (
                     <tr key={`${t.ts || 't'}-${i}`}>
-                      <td>{formatIstTime(t.ts)}</td>
-                      <td>{formatEtWindow(t.ts)}</td>
                       <td>{t.side || '—'}</td>
                       <td>{t.outcome || '—'}</td>
                       <td>{toNum(t.price).toFixed(2)}</td>
@@ -704,8 +1048,6 @@ export default function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>Start (IST)</th>
-                    <th>BTC window (ET)</th>
                     <th>Outcome</th>
                     <th>Buy</th>
                     <th>Sell</th>
@@ -716,8 +1058,6 @@ export default function App() {
                 <tbody>
                   {detailRoundtrips.map((r) => (
                     <tr key={r.id}>
-                      <td>{formatIstTime(r.buy_ts)}</td>
-                      <td>{formatEtWindow(r.buy_ts)}</td>
                       <td>{r.outcome || '—'}</td>
                       <td>{toNum(r.buy_price).toFixed(2)}</td>
                       <td>{toNum(r.sell_price).toFixed(2)}</td>
