@@ -179,10 +179,22 @@ class ExternalDataService:
                                         continue
                                     try:
                                         if event.get("best_bid") is not None:
-                                            self._clob_books[asset_id]["best_bid"] = float(event.get("best_bid"))
+                                            new_bid = float(event.get("best_bid"))
+                                            self._clob_books[asset_id]["best_bid"] = new_bid
+                                            existing_bids = self._clob_books[asset_id].get("bids") or []
+                                            if existing_bids:
+                                                existing_bids[0] = {**existing_bids[0], "price": str(new_bid)}
+                                            else:
+                                                self._clob_books[asset_id]["bids"] = [{"price": str(new_bid), "size": "0"}]
                                             updated_any = True
                                         if event.get("best_ask") is not None:
-                                            self._clob_books[asset_id]["best_ask"] = float(event.get("best_ask"))
+                                            new_ask = float(event.get("best_ask"))
+                                            self._clob_books[asset_id]["best_ask"] = new_ask
+                                            existing_asks = self._clob_books[asset_id].get("asks") or []
+                                            if existing_asks:
+                                                existing_asks[0] = {**existing_asks[0], "price": str(new_ask)}
+                                            else:
+                                                self._clob_books[asset_id]["asks"] = [{"price": str(new_ask), "size": "0"}]
                                             updated_any = True
                                     except (TypeError, ValueError):
                                         pass

@@ -283,6 +283,12 @@ def verify_roundtrip(strategy: str, rt: dict) -> dict:
       - UNVERIFIABLE: winner unknown or trade closed early (sell not near 0/1).
     """
     slug = rt["window_slug"]
+    if not slug:
+        return {**{"strategy": strategy, "slug": "", "outcome": rt.get("outcome", ""),
+                   "buy_price": float(rt.get("buy_price") or 0), "sell_price": float(rt.get("sell_price") or 0),
+                   "pnl": float(rt.get("pnl") or 0), "size": float(rt.get("size") or 0)},
+                "true_winner": None, "verdict": "UNVERIFIABLE",
+                "reason": "Could not determine window slug from buy timestamp"}
     recorded_outcome = rt["outcome"]
     recorded_sell = float(rt.get("sell_price") or 0)
     recorded_buy = float(rt.get("buy_price") or 0)
