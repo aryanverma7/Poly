@@ -488,11 +488,11 @@ export default function App() {
 
   return (
     <div className="app">
-      {sidebarOpen && <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && <div className="sidebar-overlay" role="button" tabIndex={0} onClick={() => setSidebarOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setSidebarOpen(false)} />}
       <nav className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <strong>Navigation</strong>
-          <button type="button" className="sidebar-close" onClick={() => setSidebarOpen(false)}>×</button>
+          <button type="button" className="sidebar-close" aria-label="Close menu" onClick={() => setSidebarOpen(false)}>×</button>
         </div>
         <button type="button" className={`sidebar-item ${page.type === 'home' ? 'active' : ''}`} onClick={() => navTo({ type: 'home' })}>
           Home
@@ -514,7 +514,7 @@ export default function App() {
       </nav>
 
       <div className="top-bar">
-        <button type="button" className="menu-toggle" onClick={() => setSidebarOpen((v) => !v)}>☰</button>
+        <button type="button" className="menu-toggle" aria-label="Open menu" aria-expanded={sidebarOpen} aria-controls="sidebar" onClick={() => setSidebarOpen((v) => !v)}>☰</button>
         <h1>Polymarket BTC 5m Strategy</h1>
         {page.type === 'all' && (
           <span className="muted" style={{ marginLeft: 12 }}>All strategies (screenshot view)</span>

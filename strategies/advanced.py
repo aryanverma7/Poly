@@ -572,6 +572,7 @@ class SignalFusionStrategy(_SingleEntryBase):
 
     def _on_new_window(self):
         super()._on_new_window()
+        self._hist.clear()
 
     def run_tick(self, data: MarketData, executor: Executor) -> Optional[dict]:
         slug = getattr(data, "event_slug", "") or ""

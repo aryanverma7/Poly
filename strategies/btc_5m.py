@@ -103,7 +103,9 @@ class Btc5mStrategy(Strategy):
             if entry is not None:
                 candidates.append((entry, outcome, token_id))
 
-        move30 = getattr(data, 'binance_move_30s', None) or getattr(data, 'btc_move_30s', None)
+        move30 = getattr(data, 'binance_move_30s', None)
+        if move30 is None:
+            move30 = getattr(data, 'btc_move_30s', None)
         if move30 is not None and abs(move30) > 20:
             direction = "Up" if move30 > 0 else "Down"
             candidates = [(e, o, t) for e, o, t in candidates if o == direction]
