@@ -91,17 +91,30 @@ class PendingSell:
     outcome: str
 
 
+@dataclass
+class SharedPaperBank:
+    """Shared paper cash pool across multiple strategy executors."""
+
+    balance: float
+    starting_balance: float
+
+
 class PaperExecutor(Executor):
     """Simulated executor: tracks balance, positions, and fill history. Limit sells stay pending until market hits price."""
 
-    def __init__(self, starting_balance: float):
-        self._balance = float(starting_balance)
+    def __init__(self, starting_balance: float, shared_bank: SharedPaperBank | None = None):
+        bank = shared_bank or SharedPaperBank(
+            balance=float(starting_balance),
+            starting_balance=float(starting_balance),
+        )
+        self._bank = bank
+        self._starting_balance = float(bank.starting_balance)
         self._positions: dict[str, Position] = {}
         self._fills: list[Fill] = []
         self._pending_sells: list[PendingSell] = []
 
     def get_balance(self) -> float:
-        return self._balance
+        return float(self._bank.balance)
 
     def get_positions(self) -> list[Position]:
         return list(self._positions.values())
@@ -130,10 +143,10 @@ class PaperExecutor(Executor):
             fill_price = min(max_price, 0.99)
         size = amount_usd / fill_price
         cost = size * fill_price
-        if cost > self._balance:
-            logger.warning("Paper: insufficient balance %.2f for cost %.2f", self._balance, cost)
+        if cost > self._bank.balance:
+            logger.warning("Paper: insufficient balance %.2f for cost %.2f", self._bank.balance, cost)
             return None
-        self._balance -= cost
+        self._bank.balance -= cost
         pos = self._positions.get(token_id)
         if pos:
             total_size = pos.size + size
@@ -217,7 +230,7 @@ class PaperExecutor(Executor):
                     next_pending.append(p)
                     continue
                 revenue = sz * p.price
-                self._balance += revenue
+                self._bank.balance += revenue
                 pos.size = round(pos.size - sz, 6)
                 if pos.size <= 1e-6:
                     del self._positions[p.token_id]
@@ -303,7 +316,7 @@ class PaperExecutor(Executor):
                         order_id=tag,
                     )
                 )
-                self._balance += revenue
+                self._bank.balance += revenue
                 pnl = revenue - cost
                 logger.info(
                     "Paper settle: %s @ %.2f → revenue $%.2f, P&L $%.2f for %s",
@@ -318,7 +331,12 @@ class PaperExecutor(Executor):
 
     def get_equity_curve(self) -> list[tuple[datetime, float]]:
         """Balance after each fill (for chart). Reconstruct from start balance + fills."""
-        start = getattr(self, "_starting_balance", self._balance + self.realize_pnl())
+        # Shared-wallet paper executor: don't reference legacy `_balance`.
+        if hasattr(self, "_starting_balance"):
+            start = float(self._starting_balance)
+        else:
+            # Best-effort fallback: current balance plus realized pnl back out.
+            start = float(self.get_balance()) + float(self.realize_pnl())
         if not self._fills:
             return [(datetime.utcnow(), start)]
         curve: list[tuple[datetime, float]] = []
@@ -335,7 +353,8 @@ class PaperExecutor(Executor):
         return curve
 
     def set_starting_balance(self, value: float) -> None:
-        self._starting_balance = value
+        self._starting_balance = float(value)
+        self._bank.starting_balance = float(value)
 
 
 class LiveExecutor(Executor):
@@ -481,12 +500,16 @@ class LiveExecutor(Executor):
         return None
 
 
-def create_executor(config: Optional[Config] = None, mode_override: Optional[str] = None) -> Executor:
+def create_executor(
+    config: Optional[Config] = None,
+    mode_override: Optional[str] = None,
+    shared_paper_bank: Optional[SharedPaperBank] = None,
+) -> Executor:
     """Factory: PaperExecutor if mode is paper, else LiveExecutor. mode_override: 'paper'|'live'."""
     cfg = config or Config.from_env()
     mode = (mode_override or cfg.trading_mode).lower()
     if mode == "paper":
-        ex = PaperExecutor(cfg.paper_starting_balance)
+        ex = PaperExecutor(cfg.paper_starting_balance, shared_bank=shared_paper_bank)
         ex.set_starting_balance(cfg.paper_starting_balance)
         return ex
     return LiveExecutor()
