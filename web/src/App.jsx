@@ -138,32 +138,8 @@ export default function App() {
   const [page, setPage] = useState(() => readPageFromHash())
   const [strategyData, setStrategyData] = useState({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [safeMode, setSafeMode] = useState(true)
-  const [safeModeStrategies, setSafeModeStrategies] = useState([])
   const tickRef = useRef(null)
   const [, setTick] = useState(0)
-
-  const loadSafeMode = useCallback(async () => {
-    try {
-      const r = await fetch(api('/api/safe-mode'))
-      const d = await r.json()
-      setSafeMode(d.safe_mode)
-      setSafeModeStrategies(d.strategies || [])
-    } catch (e) { console.warn('safe-mode fetch', e) }
-  }, [])
-
-  const toggleSafeMode = useCallback(async () => {
-    const next = !safeMode
-    try {
-      const r = await fetch(api('/api/safe-mode'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: next }),
-      })
-      const d = await r.json()
-      setSafeMode(d.safe_mode)
-    } catch (e) { console.warn('safe-mode toggle', e) }
-  }, [safeMode])
 
   const loadInit = useCallback(async () => {
     try {
@@ -273,8 +249,7 @@ export default function App() {
   useEffect(() => {
     loadInit()
     loadState()
-    loadSafeMode()
-  }, [loadInit, loadState, loadSafeMode])
+  }, [loadInit, loadState])
 
   useEffect(() => {
     const onHash = () => setPage(readPageFromHash())
@@ -396,11 +371,19 @@ export default function App() {
           trades: toNum(st.session_trade_count, 0),
           invested: toNum(st.invested_amount, 0),
           balance: toNum(st.balance, 0),
+          currentWindowOutcome: String(st.current_window_outcome || ''),
+          currentWindowEntryPrice: st.current_window_entry_price == null ? null : toNum(st.current_window_entry_price, 0),
           maxTradesPerWindow: toNum(st.max_trades_per_window, 1),
-          consecutiveLosses: toNum(st.consecutive_losses, 0),
           cooldownWindows: toNum(st.cooldown_windows_remaining, 0),
           lastReject: String(st.last_rejection_reason || ''),
           stakeUsd: toNum(st.stake_usd, 0),
+          stakingMode: String(st.staking_mode || (st.dynamic_stake_enabled ? 'dynamic' : 'fixed')),
+          safeMode: String(st.safe_mode || (st.safe_mode_enabled ? 'safe' : 'unsafe')),
+          active: Boolean(st.active ?? true),
+          disabledDueToLossCap: Boolean(st.disabled_due_to_loss_cap ?? false),
+          disabledReason: String(st.disabled_reason || ''),
+          lossFromStartPct: toNum(st.loss_from_start_pct, 0),
+          maxLossPct: toNum(st.max_loss_pct, 20),
           winRate: (() => {
             const trips = strategyData[st.id]?.roundtrips?.items || []
             if (!trips.length) return null
@@ -536,24 +519,6 @@ export default function App() {
             role="button"
             tabIndex={0}
           />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className="muted">Safe mode</span>
-          <div
-            className={`switch ${safeMode ? 'on' : ''}`}
-            onClick={toggleSafeMode}
-            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && toggleSafeMode()}
-            role="button"
-            tabIndex={0}
-            title={
-              safeMode
-                ? `ON — strategies refuse entries below floor price.\nAffects: ${safeModeStrategies.join(', ')}`
-                : `OFF — no floor price restriction on any strategy`
-            }
-          />
-          <span className={`badge ${safeMode ? 'paper' : 'live'}`} style={{ fontSize: 11 }}>
-            {safeMode ? 'ON' : 'OFF'}
-          </span>
         </div>
         <button type="button" className="primary" disabled={s.running || !init?.ok} onClick={onStart}>
           Start Strategy
@@ -735,7 +700,10 @@ export default function App() {
                     </th>
                   ))}
                   <th>Cap/window</th>
-                  <th>Loss streak</th>
+                  <th>Staking</th>
+                  <th>Safety</th>
+                  <th>State</th>
+                  <th>Current window</th>
                   <th>Cooldown</th>
                   <th>Last reject reason</th>
                   {[
@@ -767,7 +735,30 @@ export default function App() {
                     <td>{row.trades}</td>
                     <td>{row.winRate != null ? `${row.winRate}%` : '—'}</td>
                     <td>{row.maxTradesPerWindow}</td>
-                    <td>{row.consecutiveLosses}</td>
+                    <td>
+                      <span className={row.stakingMode === 'dynamic' ? 'positive' : 'muted'}>
+                        {row.stakingMode === 'dynamic' ? 'Dynamic' : 'Fixed'}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={row.safeMode === 'safe' ? 'positive' : 'muted'}>
+                        {row.safeMode === 'safe' ? 'Safe' : 'Unsafe'}
+                      </span>
+                    </td>
+                    <td>
+                      {row.active ? (
+                        <span className="positive">ON</span>
+                      ) : row.disabledDueToLossCap ? (
+                        <span className="negative">OFF (loss cap)</span>
+                      ) : (
+                        <span className="negative">OFF</span>
+                      )}
+                    </td>
+                    <td>
+                      {row.currentWindowOutcome
+                        ? `${row.currentWindowOutcome} @ ${toNum(row.currentWindowEntryPrice, 0).toFixed(2)}`
+                        : '—'}
+                    </td>
                     <td>{row.cooldownWindows}</td>
                     <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.lastReject}>{row.lastReject || '—'}</td>
                     <td>{formatUsd(row.stakeUsd)}</td>
@@ -849,7 +840,29 @@ export default function App() {
                   <div className="card"><label>Balance</label><div className="value">{formatUsd(st.balance)}</div></div>
                   <div className="card"><label>Trades</label><div className="value">{toNum(st.session_trade_count)}</div></div>
                   <div className="card"><label>Cap/window</label><div className="value">{toNum(st.max_trades_per_window)}</div></div>
-                  <div className="card"><label>Loss streak</label><div className="value">{toNum(st.consecutive_losses)}</div></div>
+                  <div className="card">
+                    <label>Safety</label>
+                    <div className={`value ${String(st.safe_mode || '').toLowerCase() === 'safe' ? 'positive' : ''}`}>
+                      {String(st.safe_mode || '').toLowerCase() === 'safe' ? 'Safe' : 'Unsafe'}
+                    </div>
+                  </div>
+                  <div className="card">
+                    <label>Staking</label>
+                    <div className={`value ${String(st.staking_mode || '').toLowerCase() === 'dynamic' ? 'positive' : ''}`}>
+                      {String(st.staking_mode || '').toLowerCase() === 'dynamic' ? 'Dynamic' : 'Fixed'}
+                    </div>
+                  </div>
+                  <div className="card">
+                    <label>State</label>
+                    <div className={`value ${st.active ? 'positive' : 'negative'}`}>
+                      {st.active ? 'ON' : 'OFF'}
+                    </div>
+                    {!st.active && st.disabled_due_to_loss_cap ? (
+                      <div className="muted" style={{ marginTop: 4, fontSize: '0.8rem' }}>
+                        Loss cap hit ({toNum(st.loss_from_start_pct, 0).toFixed(2)}% / {toNum(st.max_loss_pct, 20).toFixed(2)}%)
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="card"><label>Cooldown</label><div className="value">{toNum(st.cooldown_windows_remaining)}</div></div>
                   <div className="card"><label>Stake</label><div className="value">{formatUsd(st.stake_usd)}</div></div>
                   <div className="card"><label>Last reject</label><div className="value" style={{ fontSize: '0.85rem' }}>{st.last_rejection_reason || '—'}</div></div>
@@ -953,6 +966,11 @@ export default function App() {
             <div className="muted" style={{ marginTop: 4 }}>
               Last reject reason: {selectedStrategy.last_rejection_reason || '—'}
             </div>
+            {!selectedStrategy.active && selectedStrategy.disabled_due_to_loss_cap ? (
+              <div className="negative" style={{ marginTop: 8, fontSize: '0.9rem' }}>
+                Auto-disabled: loss cap hit ({toNum(selectedStrategy.loss_from_start_pct, 0).toFixed(2)}% / {toNum(selectedStrategy.max_loss_pct, 20).toFixed(2)}%)
+              </div>
+            ) : null}
           </div>
 
           <div className="grid">
@@ -961,7 +979,24 @@ export default function App() {
             <div className="card"><label>ROI</label><div className={`value ${toNum(selectedStrategy.roi_pct) >= 0 ? 'positive' : 'negative'}`}>{toNum(selectedStrategy.roi_pct).toFixed(2)}%</div></div>
             <div className="card"><label>Trades</label><div className="value">{toNum(selectedStrategy.session_trade_count)}</div></div>
             <div className="card"><label>Cap/window</label><div className="value">{toNum(selectedStrategy.max_trades_per_window)}</div></div>
-            <div className="card"><label>Loss streak</label><div className="value">{toNum(selectedStrategy.consecutive_losses)}</div></div>
+            <div className="card">
+              <label>Safety</label>
+              <div className={`value ${String(selectedStrategy.safe_mode || '').toLowerCase() === 'safe' ? 'positive' : ''}`}>
+                {String(selectedStrategy.safe_mode || '').toLowerCase() === 'safe' ? 'Safe' : 'Unsafe'}
+              </div>
+            </div>
+            <div className="card">
+              <label>Staking</label>
+              <div className={`value ${String(selectedStrategy.staking_mode || '').toLowerCase() === 'dynamic' ? 'positive' : ''}`}>
+                {String(selectedStrategy.staking_mode || '').toLowerCase() === 'dynamic' ? 'Dynamic' : 'Fixed'}
+              </div>
+            </div>
+            <div className="card">
+              <label>State</label>
+              <div className={`value ${selectedStrategy.active ? 'positive' : 'negative'}`}>
+                {selectedStrategy.active ? 'ON' : 'OFF'}
+              </div>
+            </div>
             <div className="card"><label>Cooldown</label><div className="value">{toNum(selectedStrategy.cooldown_windows_remaining)}</div></div>
             <div className="card"><label>Stake</label><div className="value">{formatUsd(selectedStrategy.stake_usd)}</div></div>
           </div>

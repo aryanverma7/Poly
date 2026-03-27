@@ -21,6 +21,7 @@ from paper_engine import StrategyRunState, run_strategy_tick
 from strategies.base import MarketData, Strategy
 from strategies.advanced import (
     AtrGuardThresholdStrategy,
+    CascadeTrendLockStrategy,
     ConfirmedFlatScalperStrategy,
     ConfirmedMomentumCarryStrategy,
     CrossMarketSentimentProxyStrategy,
@@ -28,7 +29,7 @@ from strategies.advanced import (
     EndWindowMomentumStrategy,
     ExhaustionFadeStrategy,
     FlatMarketMeanReversionStrategy,
-    FundingTrendFollowerStrategy,
+    FundingTrendConfirmStrategy,
     HybridEarlyMomentumStrategy,
     LateHighConfidenceStrategy,
     LateFlatBetStrategy,
@@ -41,6 +42,8 @@ from strategies.advanced import (
     RebalancingArbStrategy,
     SignalFusionStrategy,
     SustainedTrendLockInStrategy,
+    VolumeSurgeBreakoutStrategy,
+    WindowMomentumCarryClassicStrategy,
     WindowMomentumCarryStrategy,
 )
 from strategies.btc_5m import Btc5mStrategy
@@ -102,7 +105,6 @@ class StrategyRunner:
             base_stake = float(getattr(_s, 'buy_amount_usd', self.config.buy_amount_usd))
             self._lane_runtime[suffix] = {
                 "last_window_realized": float(baseline),
-                "consecutive_losses": 0,
                 "cooldown_windows_remaining": 0,
                 "stake_base_usd": base_stake,
                 "stake_usd": base_stake,
@@ -110,6 +112,9 @@ class StrategyRunner:
                 "last_confidence": 0.5,
                 "stake_max_mult_override": None,
                 "last_window_pnl": 0.0,
+                "disabled_due_to_loss_cap": False,
+                "disabled_reason": "",
+                "loss_from_start_pct": 0.0,
             }
         self._external: Optional[ExternalDataService] = None
         if self.config.enable_external_data:
@@ -375,13 +380,23 @@ class StrategyRunner:
                             else:
                                 rt["stake_usd"] = float(max(1.0, base))
                             rt["last_window_pnl"] = window_pnl
-                            if window_pnl < -1e-9:
-                                rt["consecutive_losses"] += 1
-                            else:
-                                rt["consecutive_losses"] = 0
-                            if rt["consecutive_losses"] >= self.config.max_consecutive_losses:
-                                rt["cooldown_windows_remaining"] = self.config.cooldown_windows_after_losses
-                                rt["consecutive_losses"] = 0
+                            start_bal = float(getattr(executor, "_starting_balance", 0.0) or 0.0)
+                            if start_bal > 1e-9:
+                                loss_pct = max(0.0, (-cur_realized / start_bal) * 100.0)
+                                rt["loss_from_start_pct"] = float(loss_pct)
+                                max_loss_pct = float(getattr(self.config, "strategy_max_loss_pct", 20.0))
+                                if loss_pct >= max_loss_pct and not bool(rt.get("disabled_due_to_loss_cap", False)):
+                                    rt["disabled_due_to_loss_cap"] = True
+                                    rt["disabled_reason"] = (
+                                        f"disabled_loss_cap:{loss_pct:.2f}%>={max_loss_pct:.2f}%"
+                                    )
+                                    setattr(_s, "last_rejection_reason", rt["disabled_reason"])
+                                    logger.warning(
+                                        "Disabling strategy lane %s after %.2f%% loss (cap %.2f%%)",
+                                        suffix,
+                                        loss_pct,
+                                        max_loss_pct,
+                                    )
                     _CIRCUIT_EXEMPT = {"oracle_lag_proxy", "oracle_lag_early", "late_confidence"}
                     loss_count = sum(
                         1 for _, _, _, _, sfx in self._lanes
@@ -535,6 +550,8 @@ class StrategyRunner:
 
                 for strategy, executor, state, _label, suffix in self._lanes:
                     rt = self._lane_runtime.get(suffix) or {}
+                    if bool(rt.get("disabled_due_to_loss_cap", False)):
+                        continue
                     if int(rt.get("cooldown_windows_remaining", 0)) > 0:
                         continue
                     # Apply per-lane dynamic stake (paper sizing)
@@ -709,8 +726,22 @@ class StrategyRunner:
                 starting_balance = 0.0
                 balance = executor.get_balance()
             invested = executor.get_invested_amount()
+            positions = list(executor.get_positions() or [])
+            current_window_outcome = ""
+            current_window_entry_price = None
+            if positions:
+                # Pick the largest open leg if multiple are present.
+                top_pos = max(positions, key=lambda p: float(getattr(p, "size", 0.0) or 0.0))
+                current_window_outcome = str(getattr(top_pos, "outcome", "") or "")
+                try:
+                    current_window_entry_price = float(getattr(top_pos, "avg_price", None))
+                except (TypeError, ValueError):
+                    current_window_entry_price = None
             rt = self._lane_runtime.get(suffix, {})
             roi_pct = (session_pnl / starting_balance * 100.0) if starting_balance > 1e-9 else 0.0
+            disabled_due_to_loss_cap = bool(rt.get("disabled_due_to_loss_cap", False))
+            loss_from_start_pct = float(rt.get("loss_from_start_pct", 0.0))
+            max_loss_pct = float(getattr(self.config, "strategy_max_loss_pct", 20.0))
             strategies.append({
                 "balance": balance,
                 "invested_amount": invested,
@@ -718,6 +749,8 @@ class StrategyRunner:
                 "total_profit": state.total_profit,
                 "session_trade_count": state.session_trade_count,
                 "trade_count": state.trade_count,
+                "current_window_outcome": current_window_outcome,
+                "current_window_entry_price": current_window_entry_price,
                 "equity_curve": state.equity_curve[-100:],
                 "trades": state.trades[-50:],
                 "session_start": state.session_start.isoformat() if state.session_start else None,
@@ -725,11 +758,19 @@ class StrategyRunner:
                 "strategy_name": getattr(strategy, "name", strategy.__class__.__name__),
                 "max_trades_per_window": int(getattr(strategy, "max_trades_per_window", 1)),
                 "last_rejection_reason": str(getattr(strategy, "last_rejection_reason", "")),
-                "consecutive_losses": int(rt.get("consecutive_losses", 0)),
                 "cooldown_windows_remaining": int(rt.get("cooldown_windows_remaining", 0)),
                 "stake_usd": float(rt.get("stake_usd", self.config.buy_amount_usd)),
+                "dynamic_stake_enabled": bool(rt.get("dynamic_stake_enabled", True)),
+                "staking_mode": "dynamic" if bool(rt.get("dynamic_stake_enabled", True)) else "fixed",
+                "safe_mode_enabled": suffix in {"momentum_carry", "momentum_carry_classic", "opening_scalper", "price_skew_fade"},
+                "safe_mode": "safe" if suffix in {"momentum_carry", "momentum_carry_classic", "opening_scalper", "price_skew_fade"} else "unsafe",
                 "starting_balance": starting_balance,
                 "roi_pct": float(roi_pct),
+                "active": not disabled_due_to_loss_cap,
+                "disabled_due_to_loss_cap": disabled_due_to_loss_cap,
+                "disabled_reason": str(rt.get("disabled_reason", "")),
+                "loss_from_start_pct": loss_from_start_pct,
+                "max_loss_pct": max_loss_pct,
             })
         first = strategies[0] if strategies else {}
         lane_labels = [lane[3] for lane in self._lanes]
@@ -852,8 +893,22 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Window Momentum Carry",
+                "Trend Momentum Scalper",
                 "momentum_carry",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                WindowMomentumCarryClassicStrategy(
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Window Momentum Carry",
+                "momentum_carry_classic",
             )
         )
         lanes.append(
@@ -891,20 +946,39 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         )
         lanes.append(
             _lane_tuple(
-                SignalFusionStrategy(
+                VolumeSurgeBreakoutStrategy(
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    sma_window_ticks=cfg.sma_window_ticks,
-                    sma_discount_cents=0.5,
-                    imbalance_ratio=1.2,
-                    entry_end_sec=200.0,
+                    min_depth_imbalance=1.8,
+                    move_30s_trigger_usd=40.0,
+                    max_entry_cents=40,
+                    sell_target_cents=78,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "MA + Orderflow Fusion",
-                "fusion",
+                "Volume Surge Breakout",
+                "volume_breakout",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                FundingTrendConfirmStrategy(
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    min_abs_funding=0.00002,
+                    min_window_move_usd=25.0,
+                    min_move_30s_usd=12.0,
+                    max_entry_cents=45,
+                    sell_target_cents=68,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Funding Trend Confirm",
+                "funding_confirm",
             )
         )
         lanes.append(
@@ -923,34 +997,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "MA + Orderflow Fusion (Constant)",
                 "fusion_const",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
-                FundingTrendFollowerStrategy(
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Funding Trend Follower",
-                "funding_trend",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
-                FundingTrendFollowerStrategy(
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Funding Trend Follower (Constant)",
-                "funding_trend_const",
             )
         )
         lanes.append(
@@ -1124,7 +1170,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 SustainedTrendLockInStrategy(
                     min_window_move_usd=60.0,
                     min_move_30s_usd=15.0,
-                    min_entry_cents=40,
+                    min_entry_cents=15,
                     max_entry_cents=75,
                     sell_target_cents=90,
                     buy_amount_usd=cfg.buy_amount_usd,
@@ -1136,6 +1182,26 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "Sustained Trend Lock-In",
                 "sustained_trend",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
+                CascadeTrendLockStrategy(
+                    min_window_move_usd=60.0,
+                    min_move_30s_usd=15.0,
+                    min_abs_funding=0.00002,
+                    min_entry_cents=40,
+                    max_entry_cents=72,
+                    sell_target_cents=92,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "Cascade Trend Lock",
+                "cascade_trend",
             )
         )
     else:
@@ -1174,15 +1240,14 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         for suffix, mult in _stake_overrides.items():
             if suffix in _runner._lane_runtime:
                 _runner._lane_runtime[suffix]["stake_max_mult_override"] = mult
-        _constant_stake_suffixes = {
-            "oracle_lag_proxy",
-            "hybrid_momentum",
-            "fusion_const",
-            "funding_trend_const",
-        }
-        for suffix in _constant_stake_suffixes:
-            if suffix in _runner._lane_runtime:
-                rt = _runner._lane_runtime[suffix]
+        # Stake mode policy:
+        # Keep dynamic staking enabled only for selected high-conviction lanes.
+        _dynamic_stake_suffixes = {"early_breakout", "sustained_trend", "rebalancing_arb", "cascade_trend"}
+        for suffix, rt in _runner._lane_runtime.items():
+            if suffix in _dynamic_stake_suffixes:
+                rt["dynamic_stake_enabled"] = True
+                rt["stake_usd"] = float(max(1.0, rt.get("stake_base_usd", cfg.buy_amount_usd)))
+            else:
                 rt["dynamic_stake_enabled"] = False
                 rt["stake_usd"] = float(max(1.0, rt.get("stake_base_usd", cfg.buy_amount_usd)))
         _runner.start()
