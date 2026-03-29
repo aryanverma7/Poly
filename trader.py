@@ -14,7 +14,7 @@ from typing import Optional
 
 from config import Config
 from discovery import EventInfo, discover_btc_5m_event
-from executor import Executor, PaperExecutor, create_executor
+from executor import Executor, PaperExecutor, SharedPaperBank, create_executor
 from external_data import ExternalDataService
 from orderbook import BookLevel, OrderBook, fetch_book, get_btc_price_usd
 from paper_engine import StrategyRunState, run_strategy_tick
@@ -106,6 +106,7 @@ class StrategyRunner:
                 "cooldown_windows_remaining": 0,
                 "stake_base_usd": base_stake,
                 "stake_usd": base_stake,
+                "dynamic_stake_enabled": True,
                 "last_confidence": 0.5,
                 "stake_max_mult_override": None,
                 "last_window_pnl": 0.0,
@@ -365,11 +366,14 @@ class StrategyRunner:
                             confidence = float(rt.get("last_confidence", 0.5))
                             win_mult = 1.0 + (0.5 * confidence)
                             loss_mult = 1.0 - (0.4 * confidence)
-                            if window_pnl > 1e-9:
-                                stake = min(max_stake, stake * win_mult)
-                            elif window_pnl < -1e-9:
-                                stake = max(min_stake, stake * loss_mult)
-                            rt["stake_usd"] = float(stake)
+                            if bool(rt.get("dynamic_stake_enabled", True)):
+                                if window_pnl > 1e-9:
+                                    stake = min(max_stake, stake * win_mult)
+                                elif window_pnl < -1e-9:
+                                    stake = max(min_stake, stake * loss_mult)
+                                rt["stake_usd"] = float(stake)
+                            else:
+                                rt["stake_usd"] = float(max(1.0, base))
                             rt["last_window_pnl"] = window_pnl
                             if window_pnl < -1e-9:
                                 rt["consecutive_losses"] += 1
@@ -699,7 +703,7 @@ class StrategyRunner:
             if isinstance(executor, PaperExecutor):
                 session_pnl = executor.realize_pnl()
                 starting_balance = float(getattr(executor, "_starting_balance", 0.0) or 0.0)
-                balance = starting_balance + session_pnl
+                balance = float(executor.get_balance())
             else:
                 session_pnl = state.session_profit
                 starting_balance = 0.0
@@ -807,13 +811,18 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
 
     lanes: list[tuple] = []
     if mode == "paper":
-        threshold_strategy = Btc5mStrategy(
-            buy_threshold_cents=cfg.buy_threshold_cents,
-            sell_limit_cents=cfg.sell_limit_cents,
-            max_btc_move_usd=cfg.max_btc_move_usd,
-            time_window_seconds=cfg.time_window_seconds,
-            buy_amount_usd=cfg.buy_amount_usd,
+        paper_bank = SharedPaperBank(
+            balance=float(cfg.paper_starting_balance),
+            starting_balance=float(cfg.paper_starting_balance),
         )
+
+        def _paper_exec() -> Executor:
+            return create_executor(
+                cfg,
+                mode_override="paper",
+                shared_paper_bank=paper_bank,
+            )
+
         sma_strategy = Btc5mSmaStrategy(
             sell_limit_cents=cfg.sell_limit_cents,
             max_btc_move_usd=cfg.max_btc_move_usd,
@@ -823,15 +832,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
             sma_discount_cents=0.5,
             sma_max_entry_cents=cfg.sma_max_entry_cents,
             max_trades_per_window=1,
-        )
-        lanes.append(
-            _lane_tuple(
-                threshold_strategy,
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Threshold (<=25c)",
-                "threshold",
-            )
         )
         lanes.append(
             _lane_tuple(
@@ -854,23 +854,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "Window Momentum Carry",
                 "momentum_carry",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
-                OrderBookImbalanceStrategy(
-                    buy_threshold_cents=cfg.buy_threshold_cents,
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    imbalance_ratio=3.0,
-                    entry_end_sec=230.0,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Imbalance Trigger",
-                "imbalance",
             )
         )
         lanes.append(
@@ -926,6 +909,24 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         )
         lanes.append(
             _lane_tuple(
+                SignalFusionStrategy(
+                    sell_limit_cents=cfg.sell_limit_cents,
+                    max_btc_move_usd=cfg.max_btc_move_usd,
+                    buy_amount_usd=cfg.buy_amount_usd,
+                    sma_window_ticks=cfg.sma_window_ticks,
+                    sma_discount_cents=0.5,
+                    imbalance_ratio=1.2,
+                    entry_end_sec=200.0,
+                    max_trades_per_window=1,
+                ),
+                create_executor(cfg, mode_override="paper"),
+                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
+                "MA + Orderflow Fusion (Constant)",
+                "fusion_const",
+            )
+        )
+        lanes.append(
+            _lane_tuple(
                 FundingTrendFollowerStrategy(
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
@@ -940,18 +941,16 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         )
         lanes.append(
             _lane_tuple(
-                ExhaustionFadeStrategy(
+                FundingTrendFollowerStrategy(
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    min_exhaustion_usd=40.0,
-                    entry_end_sec=250.0,
                     max_trades_per_window=1,
                 ),
                 create_executor(cfg, mode_override="paper"),
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Exhaustion Fade",
-                "exhaustion_fade",
+                "Funding Trend Follower (Constant)",
+                "funding_trend_const",
             )
         )
         lanes.append(
@@ -971,45 +970,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "Oracle Lag Arb" if (cfg.enable_external_data and cfg.enable_binance_ws) else "Oracle Lag Arb (Proxy)",
                 "oracle_lag_proxy",
-            )
-        )
-        _use_ext_oracle = cfg.enable_external_data and cfg.enable_binance_ws
-        lanes.append(
-            _lane_tuple(
-                OracleLagArbProxyStrategy(
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.oracle_lag_base_stake_usd,
-                    use_external=_use_ext_oracle,
-                    entry_start_sec=0.0,
-                    entry_end_sec=60.0,
-                    move_30s_trigger_usd=30.0,
-                    oracle_gap_trigger_usd=3.0,
-                    max_entry_cents=cfg.oracle_lag_max_entry_cents,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Oracle Lag Early" if _use_ext_oracle else "Oracle Lag Early (Proxy)",
-                "oracle_lag_early",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
-                CrossMarketSentimentProxyStrategy(
-                    sell_limit_cents=55,
-                    max_entry_cents=35,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    use_external=False,
-                    entry_start_sec=0.0,
-                    entry_end_sec=200.0,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Cross-Market Bias (Proxy)",
-                "cross_market_proxy",
             )
         )
         lanes.append(
@@ -1144,24 +1104,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         )
         lanes.append(
             _lane_tuple(
-                LateFlatBetStrategy(
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    max_window_move_usd=15.0,
-                    max_move_30s_usd=10.0,
-                    max_entry_cents=50,
-                    sell_target_cents=90,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Late Flat Bet",
-                "late_flat_bet",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
                 EarlyBreakoutStrategy(
                     move_30s_trigger_usd=40.0,
                     max_entry_cents=40,
@@ -1175,24 +1117,6 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                 StrategyRunState(mode="paper", session_start=datetime.utcnow()),
                 "Early Breakout",
                 "early_breakout",
-            )
-        )
-        lanes.append(
-            _lane_tuple(
-                ConfirmedMomentumCarryStrategy(
-                    min_window_move_usd=35.0,
-                    min_move_30s_usd=10.0,
-                    max_entry_cents=55,
-                    sell_target_cents=80,
-                    buy_amount_usd=cfg.buy_amount_usd,
-                    sell_limit_cents=cfg.sell_limit_cents,
-                    max_btc_move_usd=cfg.max_btc_move_usd,
-                    max_trades_per_window=1,
-                ),
-                create_executor(cfg, mode_override="paper"),
-                StrategyRunState(mode="paper", session_start=datetime.utcnow()),
-                "Confirmed Momentum Carry",
-                "confirmed_momentum",
             )
         )
         lanes.append(
@@ -1226,24 +1150,41 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         state = StrategyRunState(mode=mode, session_start=datetime.utcnow())
         lanes.append(_lane_tuple(live_strategy, executor, state, "Live", "live"))
 
+    if mode == "paper":
+        # Enforce one shared simulated wallet across all strategy lanes.
+        for idx, lane in enumerate(lanes):
+            strategy, executor, state, label, suffix = lane
+            if isinstance(executor, PaperExecutor):
+                executor._bank = paper_bank
+                executor._starting_balance = float(paper_bank.starting_balance)
+                lanes[idx] = _lane_tuple(strategy, executor, state, label, suffix)
+
     with _runner_lock:
         if _runner and _runner.state.running:
             _runner.stop()
         _runner = StrategyRunner(initial_event=event, config=cfg, lanes=lanes)
         _stake_overrides = {
             "sma": 3.0,
-            "imbalance": 3.0,
-            "cross_market_proxy": 2.0,
             "rebalancing_arb": 2.0,
             "opening_scalper": 2.0,
             "oracle_lag_proxy": 2.0,
-            "both_sides_arb": 3.0,
             "late_confidence": 3.0,
             "mid_momentum": 2.0,
         }
         for suffix, mult in _stake_overrides.items():
             if suffix in _runner._lane_runtime:
                 _runner._lane_runtime[suffix]["stake_max_mult_override"] = mult
+        _constant_stake_suffixes = {
+            "oracle_lag_proxy",
+            "hybrid_momentum",
+            "fusion_const",
+            "funding_trend_const",
+        }
+        for suffix in _constant_stake_suffixes:
+            if suffix in _runner._lane_runtime:
+                rt = _runner._lane_runtime[suffix]
+                rt["dynamic_stake_enabled"] = False
+                rt["stake_usd"] = float(max(1.0, rt.get("stake_base_usd", cfg.buy_amount_usd)))
         _runner.start()
     return _runner
 
