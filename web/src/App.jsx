@@ -369,7 +369,6 @@ export default function App() {
           pnl: toNum(st.session_profit, 0),
           roiPct: toNum(st.roi_pct, 0),
           trades: toNum(st.session_trade_count, 0),
-          invested: toNum(st.invested_amount, 0),
           balance: toNum(st.balance, 0),
           currentWindowOutcome: String(st.current_window_outcome || ''),
           currentWindowEntryPrice: st.current_window_entry_price == null ? null : toNum(st.current_window_entry_price, 0),
@@ -679,102 +678,102 @@ export default function App() {
           <h2 className="section-title">Leaderboard</h2>
 
           <div className="card" style={{ marginBottom: 12 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  {[
-                    { col: 'label',    label: 'Strategy' },
-                    { col: 'pnl',      label: 'P&L' },
-                    { col: 'roiPct',   label: 'ROI' },
-                    { col: 'trades',   label: 'Trades' },
-                    { col: 'winRate',  label: 'Win %' },
-                  ].map(({ col, label }) => (
-                    <th
-                      key={col}
-                      onClick={() => handleLbSort(col)}
-                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
-                    >
-                      {label}
-                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
-                    </th>
-                  ))}
-                  <th>Cap/window</th>
-                  <th>Staking</th>
-                  <th>Safety</th>
-                  <th>State</th>
-                  <th>Current window</th>
-                  <th>Cooldown</th>
-                  <th>Last reject reason</th>
-                  {[
-                    { col: 'stakeUsd', label: 'Stake' },
-                    { col: 'invested', label: 'Invested' },
-                    { col: 'balance',  label: 'Balance' },
-                  ].map(({ col, label }) => (
-                    <th
-                      key={col}
-                      onClick={() => handleLbSort(col)}
-                      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
-                    >
-                      {label}
-                      {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
-                    </th>
-                  ))}
-                  {page.type !== 'all' && <th>Page</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {leaderboard.map((row, i) => (
-                  <tr key={row.id || row.label}>
-                    <td>{i + 1}</td>
-                    <td>{row.label}</td>
-                    <td className={row.pnl >= 0 ? 'positive' : 'negative'}>
-                      {formatUsd(row.pnl, true)}
-                    </td>
-                    <td className={row.roiPct >= 0 ? 'positive' : 'negative'}>{row.roiPct.toFixed(2)}%</td>
-                    <td>{row.trades}</td>
-                    <td>{row.winRate != null ? `${row.winRate}%` : '—'}</td>
-                    <td>{row.maxTradesPerWindow}</td>
-                    <td>
-                      <span className={row.stakingMode === 'dynamic' ? 'positive' : 'muted'}>
-                        {row.stakingMode === 'dynamic' ? 'Dynamic' : 'Fixed'}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={row.safeMode === 'safe' ? 'positive' : 'muted'}>
-                        {row.safeMode === 'safe' ? 'Safe' : 'Unsafe'}
-                      </span>
-                    </td>
-                    <td>
-                      {row.active ? (
-                        <span className="positive">ON</span>
-                      ) : row.disabledDueToLossCap ? (
-                        <span className="negative">OFF (loss cap)</span>
-                      ) : (
-                        <span className="negative">OFF</span>
-                      )}
-                    </td>
-                    <td>
-                      {row.currentWindowOutcome
-                        ? `${row.currentWindowOutcome} @ ${toNum(row.currentWindowEntryPrice, 0).toFixed(2)}`
-                        : '—'}
-                    </td>
-                    <td>{row.cooldownWindows}</td>
-                    <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.lastReject}>{row.lastReject || '—'}</td>
-                    <td>{formatUsd(row.stakeUsd)}</td>
-                    <td>{formatUsd(row.invested)}</td>
-                    <td>{formatUsd(row.balance)}</td>
-                    {page.type !== 'all' && (
-                      <td>
-                        <button type="button" onClick={() => setPage({ type: 'strategy', strategyId: row.id })}>
-                          Open
-                        </button>
-                      </td>
-                    )}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    {[
+                      { col: 'label',    label: 'Strategy' },
+                      { col: 'pnl',      label: 'P&L' },
+                      { col: 'roiPct',   label: 'ROI' },
+                      { col: 'trades',   label: 'Trades' },
+                      { col: 'winRate',  label: 'Win %' },
+                    ].map(({ col, label }) => (
+                      <th
+                        key={col}
+                        onClick={() => handleLbSort(col)}
+                        style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                      >
+                        {label}
+                        {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                      </th>
+                    ))}
+                    <th>Cap/window</th>
+                    <th>Staking</th>
+                    <th>Safety</th>
+                    <th>State</th>
+                    <th>Current window</th>
+                    <th>Cooldown</th>
+                    <th>Last reject reason</th>
+                    {[
+                      { col: 'stakeUsd', label: 'Stake' },
+                      { col: 'balance',  label: 'Balance' },
+                    ].map(({ col, label }) => (
+                      <th
+                        key={col}
+                        onClick={() => handleLbSort(col)}
+                        style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                      >
+                        {label}
+                        {lbSort.col === col ? (lbSort.dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+                      </th>
+                    ))}
+                    {page.type !== 'all' && <th>Page</th>}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {leaderboard.map((row, i) => (
+                    <tr key={row.id || row.label}>
+                      <td>{i + 1}</td>
+                      <td>{row.label}</td>
+                      <td className={row.pnl >= 0 ? 'positive' : 'negative'}>
+                        {formatUsd(row.pnl, true)}
+                      </td>
+                      <td className={row.roiPct >= 0 ? 'positive' : 'negative'}>{row.roiPct.toFixed(2)}%</td>
+                      <td>{row.trades}</td>
+                      <td>{row.winRate != null ? `${row.winRate}%` : '—'}</td>
+                      <td>{row.maxTradesPerWindow}</td>
+                      <td>
+                        <span className={row.stakingMode === 'dynamic' ? 'positive' : 'muted'}>
+                          {row.stakingMode === 'dynamic' ? 'Dynamic' : 'Fixed'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={row.safeMode === 'safe' ? 'positive' : 'muted'}>
+                          {row.safeMode === 'safe' ? 'Safe' : 'Unsafe'}
+                        </span>
+                      </td>
+                      <td>
+                        {row.active ? (
+                          <span className="positive">ON</span>
+                        ) : row.disabledDueToLossCap ? (
+                          <span className="negative">OFF (loss cap)</span>
+                        ) : (
+                          <span className="negative">OFF</span>
+                        )}
+                      </td>
+                      <td>
+                        {row.currentWindowOutcome
+                          ? `${row.currentWindowOutcome} @ ${toNum(row.currentWindowEntryPrice, 0).toFixed(2)}`
+                          : '—'}
+                      </td>
+                      <td>{row.cooldownWindows}</td>
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.lastReject}>{row.lastReject || '—'}</td>
+                      <td>{formatUsd(row.stakeUsd)}</td>
+                      <td>{formatUsd(row.balance)}</td>
+                      {page.type !== 'all' && (
+                        <td>
+                          <button type="button" onClick={() => setPage({ type: 'strategy', strategyId: row.id })}>
+                            Open
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           {comparisonChartData && (

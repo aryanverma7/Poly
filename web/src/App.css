@@ -52,6 +52,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
 th { color: var(--muted); }
+.table-wrap { width: 100%; overflow-x: auto; overflow-y: hidden; }
+.table-wrap table { min-width: 1120px; }
 .clean-chart { background: linear-gradient(180deg, rgba(59, 130, 246, 0.06), rgba(0, 0, 0, 0) 70%), var(--surface); }
 .scroll-table { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; margin-top: 0.6rem; }
 .scroll-table table { margin: 0; }

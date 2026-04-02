@@ -237,6 +237,9 @@ class AtrGuardThresholdStrategy(_SingleEntryBase):
             self._reject("no_price_trigger")
             return None
         ask, outcome, token_id = candidates[0]
+        if ask < 0.13:
+            self._reject("ask_below_floor")
+            return None
         return self._buy_and_queue_sell(
             data, executor, token_id, outcome, ask, "buy_then_sell_atr_guard", {"guard_usd": round(guard, 2)}
         )

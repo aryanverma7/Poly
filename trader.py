@@ -865,7 +865,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
             )
 
         sma_strategy = Btc5mSmaStrategy(
-            sell_limit_cents=cfg.sell_limit_cents,
+            sell_limit_cents=60,
             max_btc_move_usd=cfg.max_btc_move_usd,
             time_window_seconds=180,
             buy_amount_usd=cfg.buy_amount_usd,
@@ -984,7 +984,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
         lanes.append(
             _lane_tuple(
                 SignalFusionStrategy(
-                    sell_limit_cents=cfg.sell_limit_cents,
+                    sell_limit_cents=60,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
                     sma_window_ticks=cfg.sma_window_ticks,
@@ -1026,7 +1026,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     buy_amount_usd=cfg.buy_amount_usd,
                     late_start_sec=220.0,
                     btc_move_trigger_usd=60.0,
-                    max_entry_cents=78,
+                    max_entry_cents=65,
                     sell_target_cents=93,
                     max_trades_per_window=1,
                 ),
@@ -1044,7 +1044,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
                     momentum_trigger_usd=cfg.hybrid_momentum_trigger_usd,
-                    atr_min_usd=cfg.hybrid_atr_min_usd,
+                    atr_min_usd=80,
                     max_entry_cents=cfg.hybrid_max_entry_cents,
                     entry_end_sec=200.0,
                     max_trades_per_window=1,
@@ -1078,8 +1078,8 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     sell_limit_cents=cfg.sell_limit_cents,
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
-                    move_30s_min_usd=7.0,
-                    window_move_min_usd=10.0,
+                    move_30s_min_usd=25.0,
+                    window_move_min_usd=35.0,
                     max_entry_cents=40,
                     sell_target_cents=65,
                     max_trades_per_window=1,
