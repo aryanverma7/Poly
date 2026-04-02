@@ -40,6 +40,13 @@ function toNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback
 }
 
+/** For optional API fields: null/invalid → null (never coerce to 0 for display). */
+function optionalFiniteNum(v) {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 function formatUsd(v, signed = false) {
   const n = toNum(v, 0)
   if (!signed) return `$${n.toFixed(2)}`
@@ -371,7 +378,7 @@ export default function App() {
           trades: toNum(st.session_trade_count, 0),
           balance: toNum(st.balance, 0),
           currentWindowOutcome: String(st.current_window_outcome || ''),
-          currentWindowEntryPrice: st.current_window_entry_price == null ? null : toNum(st.current_window_entry_price, 0),
+          currentWindowEntryPrice: optionalFiniteNum(st.current_window_entry_price),
           maxTradesPerWindow: toNum(st.max_trades_per_window, 1),
           cooldownWindows: toNum(st.cooldown_windows_remaining, 0),
           lastReject: String(st.last_rejection_reason || ''),
@@ -755,7 +762,11 @@ export default function App() {
                       </td>
                       <td>
                         {row.currentWindowOutcome
-                          ? `${row.currentWindowOutcome} @ ${toNum(row.currentWindowEntryPrice, 0).toFixed(2)}`
+                          ? `${row.currentWindowOutcome} @ ${
+                              row.currentWindowEntryPrice != null
+                                ? row.currentWindowEntryPrice.toFixed(2)
+                                : '—'
+                            }`
                           : '—'}
                       </td>
                       <td>{row.cooldownWindows}</td>

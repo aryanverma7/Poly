@@ -51,6 +51,23 @@ from strategies.btc_5m_sma import Btc5mSmaStrategy
 
 logger = logging.getLogger(__name__)
 
+# Paper lane log_suffix values whose strategy run_tick enforces a minimum best-ask
+# (rejects or skips entries below a fixed $ price). Keep in sync with
+# strategies/advanced.py + start_runner() lane list — not legacy global "safe mode".
+_EXPLICIT_MIN_ASK_FLOOR_SUFFIXES = frozenset(
+    {
+        "opening_scalper",  # OpeningDiscountScalperStrategy: skip ask < 0.08
+        "price_skew_fade",  # PriceSkewFadeStrategy: reject cheap_ask < 0.10
+        "atr_guard",  # AtrGuardThresholdStrategy: reject ask < 0.13
+        "late_confidence",  # LateHighConfidenceStrategy: reject ask < min_entry
+        "cascade_trend",  # CascadeTrendLockStrategy: reject ask < min_entry
+        "sustained_trend",  # SustainedTrendLockInStrategy: reject ask < min_entry
+        "fusion_const",  # SignalFusionStrategy: only ask >= 0.13
+        "flat_mean_rev",  # FlatMarketMeanReversionStrategy: only ask >= 0.10
+        "confirmed_flat",  # ConfirmedFlatScalperStrategy: only ask >= 0.10
+    }
+)
+
 _runner: Optional["StrategyRunner"] = None
 _runner_lock = threading.Lock()
 
@@ -762,8 +779,8 @@ class StrategyRunner:
                 "stake_usd": float(rt.get("stake_usd", self.config.buy_amount_usd)),
                 "dynamic_stake_enabled": bool(rt.get("dynamic_stake_enabled", True)),
                 "staking_mode": "dynamic" if bool(rt.get("dynamic_stake_enabled", True)) else "fixed",
-                "safe_mode_enabled": suffix in {"momentum_carry", "momentum_carry_classic", "opening_scalper", "price_skew_fade"},
-                "safe_mode": "safe" if suffix in {"momentum_carry", "momentum_carry_classic", "opening_scalper", "price_skew_fade"} else "unsafe",
+                "safe_mode_enabled": suffix in _EXPLICIT_MIN_ASK_FLOOR_SUFFIXES,
+                "safe_mode": "safe" if suffix in _EXPLICIT_MIN_ASK_FLOOR_SUFFIXES else "unsafe",
                 "starting_balance": starting_balance,
                 "roi_pct": float(roi_pct),
                 "active": not disabled_due_to_loss_cap,
