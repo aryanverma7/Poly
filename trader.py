@@ -62,7 +62,7 @@ _EXPLICIT_MIN_ASK_FLOOR_SUFFIXES = frozenset(
         "late_confidence",  # LateHighConfidenceStrategy: reject ask < min_entry
         "cascade_trend",  # CascadeTrendLockStrategy: reject ask < min_entry
         "sustained_trend",  # SustainedTrendLockInStrategy: reject ask < min_entry
-        "fusion_const",  # SignalFusionStrategy: only ask >= 0.13
+        "fusion_const",  # SignalFusionStrategy: ask >= 0.18 (plus SMA / imbalance)
         "flat_mean_rev",  # FlatMarketMeanReversionStrategy: only ask >= 0.10
         "confirmed_flat",  # ConfirmedFlatScalperStrategy: only ask >= 0.10
     }
@@ -123,6 +123,7 @@ class StrategyRunner:
             self._lane_runtime[suffix] = {
                 "last_window_realized": float(baseline),
                 "cooldown_windows_remaining": 0,
+                "consecutive_losses": 0,
                 "stake_base_usd": base_stake,
                 "stake_usd": base_stake,
                 "dynamic_stake_enabled": True,
@@ -414,18 +415,23 @@ class StrategyRunner:
                                         loss_pct,
                                         max_loss_pct,
                                     )
-                    _CIRCUIT_EXEMPT = {"oracle_lag_proxy", "oracle_lag_early", "late_confidence"}
-                    loss_count = sum(
-                        1 for _, _, _, _, sfx in self._lanes
-                        if self._lane_runtime.get(sfx, {}).get("last_window_pnl", 0) < -1e-9
-                    )
-                    if loss_count >= 3:
-                        logger.warning("Trending regime detected: %d lanes lost. Pausing direction-dependent for 2 windows.", loss_count)
-                        for _, _, _, _, sfx in self._lanes:
-                            if sfx not in _CIRCUIT_EXEMPT:
-                                rt2 = self._lane_runtime.get(sfx, {})
-                                rt2["cooldown_windows_remaining"] = max(
-                                    rt2.get("cooldown_windows_remaining", 0), 2
+                            # Per-lane loss streak cooldown only (not global across strategies).
+                            if window_pnl < -1e-9:
+                                rt["consecutive_losses"] = int(rt.get("consecutive_losses", 0)) + 1
+                            else:
+                                rt["consecutive_losses"] = 0
+                            max_streak = int(getattr(self.config, "max_consecutive_losses", 3))
+                            cd_after = int(getattr(self.config, "cooldown_windows_after_losses", 3))
+                            if rt["consecutive_losses"] >= max_streak > 0:
+                                rt["cooldown_windows_remaining"] = max(
+                                    int(rt.get("cooldown_windows_remaining", 0)), cd_after
+                                )
+                                rt["consecutive_losses"] = 0
+                                logger.warning(
+                                    "Lane %s: %d consecutive losing windows — cooldown %d windows",
+                                    suffix,
+                                    max_streak,
+                                    cd_after,
                                 )
                     # Feed previous window resolution to WindowMomentumCarry strategies
                     if old_token_map and hasattr(self, "_last_books"):
@@ -986,7 +992,7 @@ def start_runner(mode: str = "paper") -> StrategyRunner:
                     max_btc_move_usd=cfg.max_btc_move_usd,
                     buy_amount_usd=cfg.buy_amount_usd,
                     min_abs_funding=0.00002,
-                    min_window_move_usd=25.0,
+                    min_window_move_usd=35.0,
                     min_move_30s_usd=12.0,
                     max_entry_cents=45,
                     sell_target_cents=68,

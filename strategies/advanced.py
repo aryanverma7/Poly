@@ -581,6 +581,9 @@ class SignalFusionStrategy(_SingleEntryBase):
             bid_depth, ask_depth = _depth_near(book, width=0.02)
             ratio = (bid_depth + 1e-9) / (ask_depth + 1e-9)
             if ask >= 0.13 and ask <= self.max_entry and ask <= sma - self.sma_discount and ratio >= self.imbalance_ratio:
+                if ask < 0.18:
+                    self._reject("ask_too_cheap_fusion")
+                    continue
                 candidates.append((ask, sma, ratio, outcome, token_id))
         move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
         if move30 is not None and abs(move30) > 15:
@@ -1152,12 +1155,16 @@ class VolumeSurgeBreakoutStrategy(_SingleEntryBase):
 
 
 class FundingTrendConfirmStrategy(_SingleEntryBase):
-    """Funding + window move + 30s move must all agree."""
+    """
+    Funding is a slow bias; this-window BTC move is authoritative.
+    Require: funding sign matches window_move, and move30 matches window_move
+    (so we do not lean on funding when the live window disagrees).
+    """
 
     def __init__(
         self,
         min_abs_funding: float = 0.00002,
-        min_window_move_usd: float = 25.0,
+        min_window_move_usd: float = 35.0,
         min_move_30s_usd: float = 12.0,
         max_entry_cents: int = 45,
         sell_target_cents: int = 68,
@@ -1201,9 +1208,11 @@ class FundingTrendConfirmStrategy(_SingleEntryBase):
 
         d_funding = "Up" if funding > 0 else "Down"
         d_window = "Up" if window_move > 0 else "Down"
-        d_move30 = "Up" if move30 > 0 else "Down"
-        if not (d_funding == d_window == d_move30):
-            self._reject("triple_direction_mismatch")
+        if d_funding != d_window:
+            self._reject("funding_window_direction_mismatch")
+            return None
+        if (move30 > 0) != (window_move > 0):
+            self._reject("move30_window_direction_mismatch")
             return None
 
         token_id = data.token_ids.get(d_window)
@@ -1536,14 +1545,14 @@ class MidWindowMomentumStrategy(_SingleEntryBase):
     Both the 30s BTC move AND total window move must agree in direction.
     Enters when market likely lags the established trend.
     - Entry: T=60-180s
-    - Need 30s move > $20 AND window move > $25 in same direction
+    - Need |30s move| > $25 AND |window move| > $35 in same direction
     - Buy cheap side (≤ 40¢), target 65¢
     """
 
     def __init__(
         self,
-        move_30s_min_usd: float = 20.0,
-        window_move_min_usd: float = 25.0,
+        move_30s_min_usd: float = 25.0,
+        window_move_min_usd: float = 35.0,
         max_entry_cents: int = 40,
         sell_target_cents: int = 65,
         **kwargs,
@@ -1720,13 +1729,16 @@ class FlatMarketMeanReversionStrategy(_SingleEntryBase):
             self._reject("entry_window_closed")
             return None
 
+        if data.btc_atr_1m_10m is None:
+            self._reject("atr_warmup")
+            return None
         atr = data.btc_atr_1m_10m
         ref = data.reference_btc_price
         cur = data.current_btc_price
         move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
 
         # Reject if ATR is high (we're in a trending/volatile regime)
-        if atr is not None and atr > self.max_atr:
+        if atr > self.max_atr:
             self._reject("atr_too_high")
             return None
 
@@ -1813,13 +1825,16 @@ class ConfirmedFlatScalperStrategy(_SingleEntryBase):
             self._reject("entry_window_closed")
             return None
 
+        if data.btc_atr_1m_10m is None:
+            self._reject("atr_warmup")
+            return None
         atr = data.btc_atr_1m_10m
         ref = data.reference_btc_price
         cur = data.current_btc_price
         move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
 
         # All three flatness guards — tighter than FlatMarketMeanReversion
-        if atr is not None and atr > self.max_atr:
+        if atr > self.max_atr:
             self._reject("atr_too_high")
             return None
 
@@ -1909,12 +1924,15 @@ class PriceSkewFadeStrategy(_SingleEntryBase):
             self._reject("entry_window_closed")
             return None
 
+        if data.btc_atr_1m_10m is None:
+            self._reject("atr_warmup")
+            return None
         atr = data.btc_atr_1m_10m
         ref = data.reference_btc_price
         cur = data.current_btc_price
         move30 = data.binance_move_30s if data.binance_move_30s is not None else data.btc_move_30s
 
-        if atr is not None and atr > self.max_atr:
+        if atr > self.max_atr:
             self._reject("atr_too_high")
             return None
 
