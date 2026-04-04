@@ -125,6 +125,21 @@ class Btc5mSmaStrategy(Strategy):
         move30 = getattr(data, 'binance_move_30s', None)
         if move30 is None:
             move30 = getattr(data, 'btc_move_30s', None)
+
+        # Same ref/cur as btc guard above — never use (price or 0); one None would fake ~80k moves.
+        if ref is not None and cur is not None:
+            window_move = cur - ref
+            if abs(window_move) > 25:
+                if move30 is not None:
+                    if (window_move > 0) != (move30 > 0):
+                        self.last_rejection_reason = "sma_momentum_reversing"
+                        return None
+                    direction = "Up" if window_move > 0 else "Down"
+                    candidates = [(a, s, o, t) for a, s, o, t in candidates if o == direction]
+                else:
+                    direction = "Up" if window_move > 0 else "Down"
+                    candidates = [(a, s, o, t) for a, s, o, t in candidates if o == direction]
+
         if move30 is not None and abs(move30) > 20:
             direction = "Up" if move30 > 0 else "Down"
             candidates = [(a, s, o, t) for a, s, o, t in candidates if o == direction]

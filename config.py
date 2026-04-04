@@ -37,6 +37,7 @@ MAX_CONSECUTIVE_LOSSES: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
 COOLDOWN_WINDOWS_AFTER_LOSSES: int = int(os.getenv("COOLDOWN_WINDOWS_AFTER_LOSSES", "3"))
 STAKE_MIN_MULT: float = float(os.getenv("STAKE_MIN_MULT", "0.25"))
 STAKE_MAX_MULT: float = float(os.getenv("STAKE_MAX_MULT", "4"))
+STRATEGY_MAX_LOSS_PCT: float = float(os.getenv("STRATEGY_MAX_LOSS_PCT", "20"))
 
 # Event slug pattern for discovery
 EVENT_SLUG_CONTAINS: str = os.getenv("EVENT_SLUG_CONTAINS", "btc-updown-5m")
@@ -81,6 +82,7 @@ class Config:
     cooldown_windows_after_losses: int
     stake_min_mult: float
     stake_max_mult: float
+    strategy_max_loss_pct: float
     event_slug_contains: str
     gamma_api_base: str
     clob_api_base: str
@@ -123,6 +125,7 @@ class Config:
             cooldown_windows_after_losses=COOLDOWN_WINDOWS_AFTER_LOSSES,
             stake_min_mult=STAKE_MIN_MULT,
             stake_max_mult=STAKE_MAX_MULT,
+            strategy_max_loss_pct=STRATEGY_MAX_LOSS_PCT,
             event_slug_contains=EVENT_SLUG_CONTAINS,
             gamma_api_base=GAMMA_API_BASE,
             clob_api_base=CLOB_API_BASE,

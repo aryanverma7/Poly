@@ -37,17 +37,27 @@ class StrategyStateItem(BaseModel):
     total_profit: float = 0.0
     session_trade_count: int = 0
     trade_count: int = 0
+    current_window_outcome: str = ""
+    current_window_entry_price: float | None = None
     equity_curve: list[list] = []
     trades: list = []
     session_start: str | None = None
     last_error: str | None = None
     max_trades_per_window: int = 1
     last_rejection_reason: str = ""
-    consecutive_losses: int = 0
     cooldown_windows_remaining: int = 0
     stake_usd: float = 0.0
+    dynamic_stake_enabled: bool = True
+    staking_mode: str = "dynamic"
+    safe_mode_enabled: bool = False
+    safe_mode: str = "unsafe"
     starting_balance: float = 0.0
     roi_pct: float = 0.0
+    active: bool = True
+    disabled_due_to_loss_cap: bool = False
+    disabled_reason: str = ""
+    loss_from_start_pct: float = 0.0
+    max_loss_pct: float = 20.0
 
 
 class StateResponse(BaseModel):
@@ -192,17 +202,27 @@ def get_state() -> StateResponse:
             total_profit=st.get("total_profit", 0),
             session_trade_count=st.get("session_trade_count", 0),
             trade_count=st.get("trade_count", 0),
+            current_window_outcome=st.get("current_window_outcome", ""),
+            current_window_entry_price=st.get("current_window_entry_price"),
             equity_curve=st.get("equity_curve", []),
             trades=st.get("trades", []),
             session_start=st.get("session_start"),
             last_error=st.get("last_error"),
             max_trades_per_window=st.get("max_trades_per_window", 1),
             last_rejection_reason=st.get("last_rejection_reason", ""),
-            consecutive_losses=st.get("consecutive_losses", 0),
             cooldown_windows_remaining=st.get("cooldown_windows_remaining", 0),
             stake_usd=st.get("stake_usd", 0.0),
+            dynamic_stake_enabled=bool(st.get("dynamic_stake_enabled", True)),
+            staking_mode=st.get("staking_mode", "dynamic"),
+            safe_mode_enabled=bool(st.get("safe_mode_enabled", False)),
+            safe_mode=st.get("safe_mode", "unsafe"),
             starting_balance=st.get("starting_balance", 0.0),
             roi_pct=st.get("roi_pct", 0.0),
+            active=bool(st.get("active", True)),
+            disabled_due_to_loss_cap=bool(st.get("disabled_due_to_loss_cap", False)),
+            disabled_reason=st.get("disabled_reason", ""),
+            loss_from_start_pct=float(st.get("loss_from_start_pct", 0.0)),
+            max_loss_pct=float(st.get("max_loss_pct", 20.0)),
         )
         for st in s.get("strategies", [])
     ]
@@ -294,26 +314,6 @@ def outcome_prices():
                 "last_trade": ob.last_trade_price,
             }
     return {"ok": True, "slug": ev.slug, "title": ev.title, "outcomes": outcomes}
-
-
-@app.get("/api/safe-mode")
-def safe_mode_get():
-    """Return current safe-mode state and which strategies it affects."""
-    from strategies.advanced import get_safe_mode, SAFE_MODE_STRATEGIES
-    return {"safe_mode": get_safe_mode(), "strategies": sorted(SAFE_MODE_STRATEGIES)}
-
-
-class SafeModeRequest(BaseModel):
-    enabled: bool
-
-
-@app.post("/api/safe-mode")
-def safe_mode_set(body: SafeModeRequest):
-    """Enable or disable the minimum-ask floor across all strategies."""
-    from strategies.advanced import set_safe_mode, get_safe_mode, SAFE_MODE_STRATEGIES
-    set_safe_mode(body.enabled)
-    logger.info("Safe mode set to %s", body.enabled)
-    return {"safe_mode": get_safe_mode(), "strategies": sorted(SAFE_MODE_STRATEGIES)}
 
 
 @app.get("/api/verify-window")
